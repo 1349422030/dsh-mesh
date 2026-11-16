@@ -196,6 +196,7 @@ function nodeLabel(name) { return NODE_LABELS[String(name || '').toLowerCase()] 
       h = h.replace(/^https?:\/\//, '').split('/')[0].replace(/:\d+$/, '')
       if (!h) return true
       if (h === 'localhost' || h === '::1' || h === '0.0.0.0' || h === '127.0.0.1') return true
+      if (h.indexOf('.') < 0) return true // 主机名（DESKTOP-xxx / home2）
       if (/(\.local|\.lan|\.home|\.internal)$/.test(h)) return true
       var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h)
       if (m) {
@@ -1323,16 +1324,7 @@ function sakuraTunnelsForDevice(data, devKey) {
   var out = []
   for (var i = 0; i < (acc.tunnels || []).length; i++) {
     var t = acc.tunnels[i]
-    var dk = String(t.deviceKey || '').toLowerCase()
-    var mapped = null
-    if (dk === 'home1') mapped = 'home'
-    if (!mapped) {
-      var hay = (String(t.name || '') + ' ' + String(t.note || '')).toLowerCase()
-      else if (/company|公司1/.test(hay)) mapped = 'company'
-      else if (/home1|家里1|个人1/.test(hay)) mapped = 'home'
-      else if (/phone|手机/.test(hay)) mapped = 'phone-node'
-    }
-    if (mapped === key) out.push(t)
+    if (peerDeviceKey(t.deviceKey || '') === key) out.push(t)
   }
   return out
 }
@@ -2026,6 +2018,7 @@ function deviceLinkState(data, peer, lanMap) {
         if (!h) return '—'
         if (h.platform === 'linux' && String(h.arch || '').indexOf('arm') === 0) return '手机'
         var cpu = String(h.cpuModel || '')
+        if (/\b(i[3579]-\d{4,5}(U|H|P|HS)|Ryzen \d+ \d+(U|H|HS))\b/i.test(cpu)) return '笔记本'
         return cpu ? '主机' : '—'
       }
       function memTextOf(h) {
