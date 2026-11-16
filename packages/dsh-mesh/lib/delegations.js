@@ -12,14 +12,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { cliJson, meshHome, nodeExec, resolveRepo, run, unwrapPeerCall } from './collect.js'
 
-export const NODE_LABELS = {
-  home: 'peer-x',
-  home1: 'peer-x',
-  home2: 'peer-x',
-  company: 'peer-x',
-  company2: 'peer-x',
-  'company2-lan': 'peer-x（内网）'
-}
+export const NODE_LABELS = {}
 
 export function nodeLabel(name) {
   return NODE_LABELS[String(name || '').toLowerCase()] || String(name || '未知节点')

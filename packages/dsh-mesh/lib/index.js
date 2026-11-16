@@ -16,18 +16,20 @@ import { listDelegations, sessionHistory, taskStatus } from './delegations.js'
 import { probePublicTarget } from './public-probe.js'
 import { permissionZh } from './permissions-zh.js'
 import { networkInterfaces } from 'node:os'
+import { lookup } from 'node:dns/promises'
 import net from 'node:net'
 import tls from 'node:tls'
 import { join } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 
 /** Cordis inject 列表：只需要 webServer。 */
 export const inject = ['webServer']
 
 export const name = '@linyanzhi/dsh-mesh'
 
-// 2026-11-09：默认 10s（可用 DSH_MESH_UI_REFRESH_MS 覆盖）；隧道/节点变化更快可见
-const REFRESH_MS = Math.max(3_000, Number(process.env.DSH_MESH_UI_REFRESH_MS || 5_000))
+// 2026-11-12：默认 60s（原 5s 太激进：每个 DSH 实例都装本插件，多实例后台刷新叠加
+// 成每 ~1.7s 一轮 mesh-health 探测，把共享 frps 隧道的 frpc 连接池打满）。可用 DSH_MESH_UI_REFRESH_MS 覆盖。
+const REFRESH_MS = Math.max(5_000, Number(process.env.DSH_MESH_UI_REFRESH_MS || 60_000))
 const LATENCY_HISTORY_MAX = 30
 const REQUEST_REFRESH_COOLDOWN_MS = 8_000
 
@@ -372,17 +374,127 @@ export function apply(ctx) {
     return data
   })
 
-  const transfersRoute = readonlyRoute('/api/dsh-mesh/transfers', async () => {
+  // 2026-11-12：传输历史（按节点存储 + 可选全网汇总）。session 记录里 read=本机发出（被对端读走）、write=本机接收（对端写入本机）。
+  function readLocalTransfers(limit = 100) {
     try {
       const list = JSON.parse(readFileSync(join(meshHome(), 'transfers.json'), 'utf8'))
-      const items = (Array.isArray(list) ? list : []).slice(-60).reverse().map((x) => ({ at: x.at || null, direction: x.direction || '', path: x.path || '', bytes: Number(x.bytes) || 0, totalBytes: Number(x.totalBytes) || 0, peer: x.peer || '' }))
-      return { ok: true, items }
-    } catch { return { ok: true, items: [] } }
+      return (Array.isArray(list) ? list : []).slice(-limit).reverse().map((x) => ({ at: x.at || null, direction: x.direction || '', path: x.path || '', offset: Number(x.offset) || 0, bytes: Number(x.bytes) || 0, totalBytes: Number(x.totalBytes) || 0, peer: x.peer || '' }))
+    } catch { return [] }
+  }
+  function peersForTransfers() {
+    try {
+      const raw = JSON.parse(readFileSync(join(meshHome(), 'peers.json'), 'utf8'))
+      const list = Array.isArray(raw) ? raw : (raw.items || raw.peers || [])
+      const isLanUrl = (url) => /\/\/(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(String(url || ''))
+      // 同一台设备可能配了多条 peer（公网 + 局域网 + exec）：按证书指纹去重，优先保留局域网 URL，避免记录重复
+      const byFp = new Map()
+      const noFp = []
+      const normFp = (fp) => String(fp || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase()
+      for (const p of Array.isArray(list) ? list : []) {
+        const name = String(p.name || p.id || '').trim()
+        if (!name || p.disabled) continue
+        const item = { name, url: String(p.url || ''), fingerprint: normFp(p.certFingerprint) }
+        if (!item.fingerprint) { noFp.push(item); continue }
+        const prev = byFp.get(item.fingerprint)
+        if (!prev || (!isLanUrl(prev.url) && isLanUrl(item.url))) byFp.set(item.fingerprint, item)
+      }
+      return [...byFp.values(), ...noFp]
+    } catch { return [] }
+  }
+  function parsePeerTransferItems(stdout) {
+    try {
+      const wrapper = JSON.parse(String(stdout || ''))
+      const text = wrapper?.result?.content?.[0]?.text
+      if (typeof text !== 'string') return []
+      const inner = JSON.parse(text)
+      return Array.isArray(inner?.items) ? inner.items : []
+    } catch { return [] }
+  }
+  // 2026-11-12：全网记录不一定每次都重新拉——12s 内存缓存 + 最近一次结果落盘快照，
+  // 对端全部离线时回退到快照（stale=true），避免面板每次切换都重新 RPC、且有备份可看。
+  const TRANSFERS_CACHE_MS = 12_000
+  const transfersAggCache = { at: 0, data: null }
+  function transfersSnapshotPath() { return join(meshHome(), 'transfers-aggregate.json') }
+  function readTransfersSnapshot() {
+    try {
+      const snap = JSON.parse(readFileSync(transfersSnapshotPath(), 'utf8'))
+      return snap && Array.isArray(snap.items) ? snap : null
+    } catch { return null }
+  }
+  function writeTransfersSnapshot(data) {
+    try { writeFileSync(transfersSnapshotPath(), JSON.stringify({ at: new Date().toISOString(), scope: 'all', items: data.items, nodes: data.nodes }, null, 2) + '\n', 'utf8') } catch { /* best effort */ }
+  }
+  const transfersRoute = readonlyRoute('/api/dsh-mesh/transfers', async (url) => {
+    const scope = String(url.searchParams.get('scope') || 'local')
+    const limit = 60
+    const generatedAt = new Date().toISOString()
+    const localItems = readLocalTransfers(limit)
+    if (scope !== 'all') return { ok: true, scope: 'local', generatedAt, cached: false, items: localItems, nodes: [{ node: '本机', ok: true, count: localItems.length }] }
+    const now = Date.now()
+    if (transfersAggCache.data && now - transfersAggCache.at < TRANSFERS_CACHE_MS) {
+      return Object.assign({}, transfersAggCache.data, { cached: true, cacheAgeMs: now - transfersAggCache.at })
+    }
+    const peers = peersForTransfers()
+    const settled = await Promise.all(peers.map(async (peer) => {
+      try {
+        const r = await runCli(['peer', 'call', 'file_transfers', '--to', peer.name, '--args', JSON.stringify({ limit }), '--json'], 6000)
+        const items = parsePeerTransferItems(r.stdout).map((x) => Object.assign({}, x, { node: peer.name }))
+        return { node: peer.name, ok: true, count: items.length, items }
+      } catch (error) {
+        return { node: peer.name, ok: false, count: 0, items: [], error: String(error?.message || error).slice(0, 160) }
+      }
+    }))
+    const merged = localItems.map((x) => Object.assign({}, x, { node: '本机' })).concat(...settled.map((x) => x.items))
+    merged.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
+    const data = {
+      ok: true,
+      scope: 'all',
+      generatedAt,
+      cached: false,
+      items: merged.slice(0, limit * Math.max(2, peers.length + 1)),
+      nodes: [{ node: '本机', ok: true, count: localItems.length }].concat(settled.map((x) => ({ node: x.node, ok: x.ok, count: x.count, error: x.error || '' })))
+    }
+    const allFailed = settled.length > 0 && settled.every((x) => !x.ok)
+    if (allFailed) {
+      const snap = readTransfersSnapshot()
+      if (snap) return Object.assign({}, snap, { ok: true, scope: 'all', stale: true, cached: true, nodes: data.nodes, generatedAt: snap.at || generatedAt })
+    }
+    transfersAggCache.at = now
+    transfersAggCache.data = data
+    writeTransfersSnapshot(data)
+    return data
   })
 
   const peersListRoute = readonlyRoute('/api/dsh-mesh/peers', async () => {
     const r = await runCli(['peer', 'list'])
-    try { const data = JSON.parse(r.stdout); return { ok: true, peers: (data.peers || []).map((p) => ({ id: p.id, name: p.name, url: p.url, addedAt: p.addedAt || null, disabled: Boolean(p.disabled) })) } } catch { return { ok: false, error: 'invalid peer list', stderr: r.stderr } }
+    try {
+      const data = JSON.parse(r.stdout)
+      const list = (data.peers || []).map((p) => ({ id: p.id, name: p.name, url: p.url, addedAt: p.addedAt || null, disabled: Boolean(p.disabled) }))
+      // 2026-11-12（用户多次强调）：节点管理表格必须显示「IP:端口」，不显示主机名/设备名。
+      // 域名型 host（如 node-x）在这里解析成 IPv4；解析失败前端显示「IP 未解析」。
+      await Promise.all(list.map(async (item) => {
+        try {
+          const u = new URL(String(item.url || ''))
+          const host = u.hostname
+          const port = u.port || ''
+          const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^\[?[0-9a-f:]+\]?$/i.test(host)
+          let ip = isIp ? host.replace(/^\[|\]$/g, '') : ''
+          if (!ip) {
+            try {
+              const rr = await lookup(host, { family: 4 })
+              ip = rr.address || ''
+            } catch {
+              /* DNS 解析失败则留空，由前端显示「IP 未解析」 */
+            }
+          }
+          item.ip = ip
+          item.port = port
+        } catch {
+          /* 无效 URL 忽略 */
+        }
+      }))
+      return { ok: true, peers: list }
+    } catch { return { ok: false, error: 'invalid peer list', stderr: r.stderr } }
   })
   const peersRemoveRoute = {
     kind: 'exact', path: '/api/dsh-mesh/peers/remove',

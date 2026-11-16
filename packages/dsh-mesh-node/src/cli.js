@@ -217,6 +217,14 @@ async function main(argv) {
     return 0
   }
 
+  // Any subcommand also accepts --help/-h and must print help instead of acting.
+  // Issue #5: `peer patch --help` used to be parsed as a normal argument and
+  // silently rewrote the patch file with the default transport.
+  if (argv.slice(1).includes('--help') || argv.slice(1).includes('-h')) {
+    console.log(HELP)
+    return 0
+  }
+
   if (cmd === 'init') {
     const force = argv.includes('--force')
     loadConfig(home)
@@ -349,6 +357,7 @@ async function main(argv) {
             certFingerprint: entry.certFingerprint,
             peersFile: peersPath(home),
             patchFile,
+            note: 'profile is NOT mounted automatically: merge the "- insert:" block from patchFile into the target profile cordis.patch.yml (a bare entry is silently ignored). Verify with: dsh --profile <name> --dump-config',
             next: `dsh --profile headless --patch "${patchFile}" "call mcp__${name}-mesh__mesh_self"`
           },
           null,

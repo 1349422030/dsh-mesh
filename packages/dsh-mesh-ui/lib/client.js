@@ -30,12 +30,40 @@ window.__ModuleLoader__.load({
 
     // 2026-11-07 用户要求：卡片标题只用固定中文叫法，不显示电脑设备名
     var NODE_LABELS = {}
-    // 2026-11-09 用户要求：名称后显示设备类型。类型依据设备快照（CPU 形态）判断，可直接改这张表：
-    var DEVICE_TYPES = {}
-    function deviceType(name) {
-      var raw = String(name || '').toLowerCase()
-      var key = peerDeviceKey(raw)
-      return DEVICE_TYPES[key] || DEVICE_TYPES[raw] || ''
+    // 2026-11-11：设备类型图标（笔记本 / 主机 / 手机），内联 SVG、无外部依赖、跟随文字颜色。
+    // 主机 = 大屏幕 + 小底座（台式机显示器），与笔记本（屏幕+全宽底座线）区分。
+    // 2026-11-11：用户明确不要擅自上色 —— 全部使用 currentColor，单色。
+    function deviceTypeIcon(type) {
+      var base = {
+        className: 'dm-dev-icon',
+        width: 24,
+        height: 24,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.7,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': 'true'
+      }
+      if (type === '手机') {
+        return h('svg', base,
+          h('rect', { x: 6, y: 2, width: 12, height: 20, rx: 2.5 }),
+          h('path', { d: 'M11 18h2' })
+        )
+      }
+      if (type === '笔记本') {
+        return h('svg', base,
+          h('rect', { x: 4, y: 5, width: 16, height: 10, rx: 1.6 }),
+          h('path', { d: 'M2 19h20' })
+        )
+      }
+      // 默认 = 主机：大屏幕 + 小底座（台式机显示器）
+      return h('svg', base,
+        h('rect', { x: 2, y: 3, width: 20, height: 14, rx: 2 }),
+        h('path', { d: 'M8 21h8' }),
+        h('path', { d: 'M12 17v4' })
+      )
     }
     function nodeDisplay(name) {
       var label = nodeLabel(name)
@@ -124,6 +152,18 @@ function nodeLabel(name) { return NODE_LABELS[String(name || '').toLowerCase()] 
       })
       return keys
     }
+    // 2026-11-11：「AI 网络2」设备-only 拓扑（画板无服务器/隧道）的默认顺序规则：
+    //   本机在中心，其余设备按固定设备顺序（FAN_ORDER）环绕；不再按“服务器亲和度”左右分栏。
+    function deviceOnlyNodeKeys(data) {
+      var d = data || {}
+      var peers = filterSelfPeers(dedupePeers(d.peers || []), d.nodeName)
+      var keys = peers.map(function (peer) { return 'peer:' + peer.name })
+      keys.sort(function (a, b) {
+        var r = fanRankOfNodeKey(a, d) - fanRankOfNodeKey(b, d)
+        return r !== 0 ? r : String(a).localeCompare(String(b))
+      })
+      return ['local'].concat(keys)
+    }
     // 2026-11-10：用户手工调整后认可的默认布局（世界坐标，10000×6000 画布内）
     // 设备按设备名（home/peer-node/company/peer-node/peer-node）映射，各机通用；服务器两张卡单独一张表
     var DEFAULT_DEVICE_POS = {}
@@ -134,16 +174,16 @@ function nodeLabel(name) { return NODE_LABELS[String(name || '').toLowerCase()] 
     function devKeyOfNodeKey(key, data) {
       return key === 'local' ? peerDeviceKey(data && data.nodeName) : peerDeviceKey(String(key || '').replace(/^peer:/, ''))
     }
-    function loadMovedLayout() {
+    function loadMovedLayout(storeKey) {
       try {
-        var raw = window.localStorage.getItem(LAYOUT_STORE_KEY)
+        var raw = window.localStorage.getItem(storeKey || LAYOUT_STORE_KEY)
         if (!raw) return {}
         var obj = JSON.parse(raw)
         return obj && typeof obj === 'object' ? obj : {}
       } catch (_) { return {} }
     }
-    function saveMovedLayout(obj) {
-      try { window.localStorage.setItem(LAYOUT_STORE_KEY, JSON.stringify(obj || {})) } catch (_) { /* ignore */ }
+    function saveMovedLayout(obj, storeKey) {
+      try { window.localStorage.setItem(storeKey || LAYOUT_STORE_KEY, JSON.stringify(obj || {})) } catch (_) { /* ignore */ }
     }
     function clampNum(v, min, max) { return Math.max(min, Math.min(max, v)) }
     // [layout-helpers-end]
@@ -215,7 +255,7 @@ function nodeLabel(name) { return NODE_LABELS[String(name || '').toLowerCase()] 
       var port = t.port ? ':' + t.port : ''
       if (relay) return { text: (relay.kind === 'frp' ? '域名穿透' : '自建 frps 中转') + ' · ' + maskHost(relay.host) + port, short: '中转' + (t.port ? ' ' + t.port : '') }
       if (t.kind === 'loopback') return { text: '本机回环', short: '本机' }
-      if (t.kind === 'lan') return { text: '局域网直连 · ' + maskHost(t.host) + port, short: 'LAN' }
+      if (t.kind === 'lan') return { text: '局域网直连 · ' + lanAddrLabel(t), short: '局域网' }
       if (t.kind === 'frp') return { text: '公网穿透 · ' + maskHost(t.host) + port, short: '穿透' }
       if (t.kind === 'wan') return { text: '公网直连 · ' + maskHost(t.host) + port, short: '公网' }
       return { text: (t.label || t.kind || '未知') + ' · ' + maskHost(t.host) + port, short: t.label || '未知' }
@@ -255,6 +295,25 @@ function nodeLabel(name) { return NODE_LABELS[String(name || '').toLowerCase()] 
 /* 2026-11-09：悬浮节点高亮 + 连线上显示完整地址 */
 .dm-edge-label { paint-order: stroke; stroke: rgba(15,17,21,.9); stroke-width: 3px; font-family: ui-monospace,Consolas,monospace; pointer-events: none; }
 body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
+/* 2026-11-11：多通道地址信息卡（悬浮设备时出现，堆叠显示，避免线上文字叠在一起） */
+.dm-chan-tip { position:absolute; z-index:4; transform:translateX(-50%); background:rgba(13,17,23,.96); border:1px solid rgba(128,128,128,.35); border-radius:8px; padding:6px 10px; box-shadow:0 8px 24px rgba(0,0,0,.28); font-size:12px; line-height:1.55; white-space:nowrap; pointer-events:none; }
+body.light .dm-chan-tip { background:rgba(255,255,255,.97); }
+.dm-chan-tip-h { font-weight:650; font-size:12.5px; margin-bottom:3px; }
+/* 2026-11-11：画布左上角连线类型图例（线段样例 + 类型说明） */
+/* 2026-11-12：连线类型图例改为横向、无背景板（节省空间、视觉更轻） */
+.dm-topo-legend { position:absolute; left:10px; top:8px; z-index:3; pointer-events:none; display:flex; flex-direction:row; align-items:center; flex-wrap:wrap; gap:4px 12px; font-size:11.5px; line-height:1.4; text-shadow:0 0 3px rgba(0,0,0,.35); }
+body.light .dm-topo-legend { text-shadow:0 0 3px rgba(255,255,255,.8); }
+.dm-topo-legend-h { font-size:11px; opacity:.55; margin:0; }
+.dm-topo-legend-row { display:flex; align-items:center; gap:4px; white-space:nowrap; }
+.dm-topo-legend-row svg { flex:0 0 auto; }
+.dm-chan-row { display:flex; align-items:center; gap:7px; }
+.dm-chan-dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
+.dm-chan-kind { opacity:.75; min-width:52px; }
+.dm-chan-addr { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
+/* 2026-11-12：悬浮卡里断开通道的红色样式（圆点红 + 地址红 + 「离线」角标） */
+.dm-chan-row.down .dm-chan-addr { color:#e5534b; }
+.dm-chan-row.down .dm-chan-kind { color:#e5534b; opacity:.65; }
+.dm-chan-down { color:#e5534b; font-size:10.5px; opacity:.92; margin-left:2px; }
 .dm-card-node.hovered { border-color: rgba(88,166,255,.95) !important; box-shadow: 0 0 0 2px rgba(88,166,255,.35), 0 10px 26px rgba(0,0,0,.25); z-index: 5; }
 .dm-world-outer { position:absolute; left:0; top:0; }
 .dm-world { position:absolute; left:0; top:0; transform-origin:0 0; }
@@ -273,6 +332,7 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
   .dm-offline-row { margin-top:5px; font-size:10.5px; color:#c9362c; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .dm-n-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .dm-n-name { font-weight:650; font-size:13px; display:flex; align-items:center; gap:7px; min-width:0; }
+.dm-dev-icon { flex:0 0 auto; opacity:1; }
 .dm-n-name span.dm-ell { overflow:visible; text-overflow:clip; white-space:nowrap; }
 .dm-dot { width:9px; height:9px; border-radius:50%; display:inline-block; background:#8b949e; flex:none; }
 .dm-dot.ok { background:#2e9e4f; box-shadow:0 0 0 3px rgba(63,185,80,.18); }
@@ -349,6 +409,13 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
 .dm-table th { text-align:left; font-weight:600; font-size:11px; opacity:.5; padding:2px 8px 5px 0; border-bottom:1px solid rgba(128,128,128,.2); white-space:nowrap; }
 .dm-table td { padding:5px 8px 5px 0; border-bottom:1px solid rgba(128,128,128,.1); font-size:12px; }
 .dm-table tr:last-child td { border-bottom:none; }
+/* 2026-11-12：右侧面板统一数据表格（固定列宽 table-layout:fixed，列对齐、行行一致，超长省略） */
+.dm-data-table { width:100%; table-layout:fixed; border-collapse:collapse; }
+.dm-data-table th { text-align:left; font-weight:600; font-size:11px; opacity:.5; padding:4px 8px 5px 0; border-bottom:1px solid rgba(128,128,128,.2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dm-data-table td { padding:5px 8px 5px 0; border-bottom:1px solid rgba(128,128,128,.1); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+.dm-data-table tr:last-child td { border-bottom:none; }
+.dm-data-table .dm-cell-actions { display:flex; gap:6px; justify-content:flex-end; }
+.dm-data-table .dm-cell-actions .dm-btn { padding:2px 8px; }
 /* 2026-11-10：委托台账表改为固定列宽 + 单行省略；非固定布局下 5 列会把「节点/任务」压到
    每行一个字，就是用户看到的竖排。完整内容看 title 悬浮提示。 */
 .dm-details .dm-table { table-layout:auto; width:100%; min-width:0; }
@@ -571,10 +638,9 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
 
     function visibleServerCount(data, show) {
       var s = show || { lan: true, public: true, sakura: true }
-      var d = data || {}
-      var peers = filterSelfPeers(dedupePeers(d.peers || []), d.nodeName)
-      var hasPublic = Boolean(publicEntryFor(d.localTunnel || {})) || Boolean(selectedPublicServer()) || peers.some(function (p) { var pt = p.tunnel || {}; return !sakuraTunnelOf(d, peerDeviceKey(p.name), p) && !isLanPeer(p) && Boolean(pt.host) && (pt.kind === 'frp' || pt.kind === 'wan') })
-      var acc = sakuraAccountOf(d)
+      // 2026-11-11 用户语义：服务器节点 = 用户显式“加入拓扑”的视图，
+      // 不从 peer 隧道 / 本机公网入口自动推导（否则“移出公网拓扑”后仍显示公网）
+      var hasPublic = Boolean(selectedPublicServer())
       // 只有用户明确加入的 Sakura 服务器才进入拓扑；账号里有隧道不等于用户同意展示
       var hasSakura = selectedSakuraServers().length > 0
       return (s.public && hasPublic ? 1 : 0) + (s.sakura && hasSakura ? 1 : 0)
@@ -582,10 +648,12 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
 
     function Viewport(props) {
       var layout = props.layout
+      // 2026-11-11：「AI 网络2」沙箱变体 = 画板只保留设备节点（不渲染服务器/隧道节点）
+      var devicesOnly = props.variant === 'v2'
       // 2026-11-10：按当前筛选的可见服务器数量决定布局（0/1/2）
       var currentFilters = (function () { try { var s = JSON.parse(window.localStorage.getItem('dsh-mesh-ui.filters.v1') || '{}') || {}; return { lan: s.lan !== false, public: s.public !== false, sakura: s.sakura !== false } } catch (_) { return { lan: true, public: true, sakura: true } } })()
       // 2026-11-10：布局服务器数使用快照；筛选切换只隐藏服务器，不触发重排。
-      var layoutServerState = useState(function () { return visibleServerCount(props.data, currentFilters) })
+      var layoutServerState = useState(function () { return devicesOnly ? 0 : visibleServerCount(props.data, currentFilters) })
       var layoutServerCount = layoutServerState[0]
       var setLayoutServerCount = layoutServerState[1]
       // 2026-11-09-v5：卡片宽度自适应 —— 子组件测量真实卡片宽高后回传，按实际尺寸重算多边形布局
@@ -593,9 +661,9 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
       var measuredSize = sizeState[0]
       var setMeasuredSize = sizeState[1]
       if (measuredSize && measuredSize.w > 0 && measuredSize.h > 0) {
-        layout = computeLayout(layout.count, { cardW: measuredSize.w, cardH: measuredSize.h, serverCount: layoutServerCount })
+        layout = computeLayout(layout.count, { cardW: measuredSize.w, cardH: measuredSize.h, serverCount: layoutServerCount, devicesOnly: devicesOnly })
       } else {
-        layout = computeLayout(layout.count, { serverCount: layoutServerCount })
+        layout = computeLayout(layout.count, { serverCount: layoutServerCount, devicesOnly: devicesOnly })
       }
       var infraBoundsRef = useRef([])
       // 2026-11-09：重置拓扑时同时通知 Topology 复位服务器卡片
@@ -605,7 +673,7 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
       function onInfraBounds(boxes) { infraBoundsRef.current = boxes || [] }
       // 服务器加入/移出拓扑后，刷新布局里的 serverCount，否则新 server 卡片不会出现
       useEffect(function () {
-        setLayoutServerCount(visibleServerCount(props.data, currentFilters))
+        setLayoutServerCount(devicesOnly ? 0 : visibleServerCount(props.data, currentFilters))
       }, [props.data, props.topoNonce])
       function onCardSize(w, h) {
         setMeasuredSize(function (prev) {
@@ -619,8 +687,10 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
       var WORLD_MIN_W = 10000
       var WORLD_MIN_H = 6000
       var WORLD_PAD = 16
-      var nodeKeys = orderedNodeKeys(props.data)
-      var layoutState = useState(loadMovedLayout)
+      // 沙箱变体用独立的拖拽位置存储，避免继承默认页（含服务器布局）里拖过的坐标
+      var movedStoreKey = devicesOnly ? 'dsh-mesh-ui.topology.layout.v2.v1' : 'dsh-mesh-ui.topology.layout.v1'
+      var nodeKeys = devicesOnly ? deviceOnlyNodeKeys(props.data) : orderedNodeKeys(props.data)
+      var layoutState = useState(function () { return loadMovedLayout(movedStoreKey) })
       var movedLayout = layoutState[0]
       var setMovedLayout = layoutState[1]
       var worldW = Math.max(layout.W, WORLD_MIN_W)
@@ -642,15 +712,15 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
         setMovedLayout(function (prev) {
           var next = Object.assign({}, prev)
           next[key] = pos
-          saveMovedLayout(next)
+          saveMovedLayout(next, movedStoreKey)
           return next
         })
       }
       function resetLayout() {
         setMovedLayout({})
-        saveMovedLayout({})
+        saveMovedLayout({}, movedStoreKey)
         // 只有点重置时才读取当前勾选服务器并重排；筛选本身不重绘
-        setLayoutServerCount(visibleServerCount(props.data, currentFilters))
+        setLayoutServerCount(devicesOnly ? 0 : visibleServerCount(props.data, currentFilters))
         // 2026-11-10：重置只恢复拓扑结构，保留用户手动拖拽的画布高度
         interactedRef.current = false
         bumpResetNonce(function (x) { return x + 1 })
@@ -850,7 +920,7 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
       // 2026-11-10：画布内的文字/勾选项全部移到画布外（上方工具栏 = 勾选 + 链路信息；下方 = 缩放/说明）
       return h('div', { className: 'dm-topo-wrap' },
         h('div', { className: 'dm-topbar' },
-          h('div', { className: 'dm-filters' },
+          devicesOnly ? null : h('div', { className: 'dm-filters' },
             [['lan', '局域网'], ['public', '公网中继'], ['sakura', '第三方穿透']].map(function (it) {
               var tr = TRANSPORTS[it[0]]
               return h('label', { key: it[0], className: 'dm-flt' + (showFilters[it[0]] ? ' on' : ''), style: { '--c': tr.color } },
@@ -859,7 +929,9 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
               )
             })
           ),
-          h('span', { className: 'dm-topbar-info' }, effLayout.count + ' 节点 · ' + effLayout.edges.length + ' 条链路 · 拖拽卡片自定义布局')
+          h('span', { className: 'dm-topbar-info' }, devicesOnly
+            ? (effLayout.count + ' 个设备节点 · 每通道一条连线（同向并排）')
+            : (effLayout.count + ' 节点 · ' + effLayout.edges.length + ' 条链路 · 拖拽卡片自定义布局'))
         ),
         h('div', { className: 'dm-viewport' + (dragging ? ' dragging' : '') + (resizing ? ' resizing' : ''), ref: viewRef,
           style: (customHeight || autoH) ? { height: (customHeight || autoH) + 'px' } : undefined,
@@ -870,9 +942,25 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
           h('div', { className: 'dm-world-outer', style: { transform: 'translate(' + view.x + 'px,' + view.y + 'px)' } },
             h('div', { className: 'dm-world', style: Object.assign({ width: effLayout.W + 'px', height: effLayout.H + 'px' },
               SUPPORTS_ZOOM ? { zoom: view.scale } : { transform: 'scale(' + view.scale + ')' }) },
-              h(Topology, { data: props.data, layout: effLayout, selectedKey: props.selectedKey, onSelect: props.onSelect, scale: view.scale, onNodeMove: moveNode, onDragEdge: autoPanAt, onCardSize: onCardSize, show: showFilters, federated: props.federated, onInfraBounds: onInfraBounds, resetNonce: resetNonce, movedLayout: movedLayout, lanNodes: props.lanNodes })
+              h(Topology, { data: props.data, layout: effLayout, selectedKey: props.selectedKey, onSelect: props.onSelect, scale: view.scale, onNodeMove: moveNode, onDragEdge: autoPanAt, onCardSize: onCardSize, show: showFilters, federated: props.federated, onInfraBounds: onInfraBounds, resetNonce: resetNonce, movedLayout: movedLayout, lanNodes: props.lanNodes, variant: props.variant })
             )
           ),
+          // 2026-11-11：画布左上角线段图例 + 连线类型说明（仅沙箱 AI 网络2）
+          devicesOnly ? h('div', { className: 'dm-topo-legend' },
+            h('div', { className: 'dm-topo-legend-h' }, '连线类型'),
+            [['lan', '局域网', false], ['sakura', '内网穿透 · 樱花', true], ['public', '公网', true]].map(function (it) {
+              var tr = TRANSPORTS[it[0]]
+              return h('div', { className: 'dm-topo-legend-row', key: it[0] },
+                h('svg', { width: 20, height: 8 }, h('line', { x1: 0, y1: 4, x2: 20, y2: 4, stroke: tr.color, strokeWidth: 2, strokeDasharray: tr.dash ? '6 5' : 'none' })),
+                h('span', null, it[1])
+              )
+            }),
+            // 2026-11-12：离线通道（线变红、悬浮卡地址变红）
+            h('div', { className: 'dm-topo-legend-row', key: 'offline' },
+              h('svg', { width: 20, height: 8 }, h('line', { x1: 0, y1: 4, x2: 20, y2: 4, stroke: '#e5534b', strokeWidth: 2 })),
+              h('span', null, '离线')
+            )
+          ) : null,
           h('div', { className: 'dm-zoom' },
             h('button', { title: '放大', onClick: function () { zoomBy(1.22) } }, '+'),
             h('button', { title: '缩小', onClick: function () { zoomBy(1 / 1.22) } }, '−'),
@@ -948,6 +1036,52 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
       var topDeviceY = positions.length ? Math.min.apply(null, positions.map(function (p) { return p[1] })) : 0
       return { count: n, cardW: cardW, cardH: cardH, gap: GAP, W: W, H: H, positions: positions, edges: polygonEdges(n), topDeviceY: topDeviceY, mode: 'nodes-only', serverCenter: null }
     }
+    // 2026-11-11：设备-only 拓扑布局（AI 网络2）：
+    //   本机（主机）居中，其余设备在其下方呈扇形（120° 弧）展开；半径按卡片不重叠自动放大。
+    function ringHasOverlap(points, cardW, cardH, GAP) {
+      for (var i = 0; i < points.length; i++) {
+        if (Math.abs(points[i][0]) < cardW + GAP && Math.abs(points[i][1]) < cardH + GAP) return true
+        for (var j = i + 1; j < points.length; j++) {
+          if (Math.abs(points[i][0] - points[j][0]) < cardW + GAP && Math.abs(points[i][1] - points[j][1]) < cardH + GAP) return true
+        }
+      }
+      return false
+    }
+    function layoutDevicesOnly(count, cardW, cardH, GAP, PAD) {
+      var n = Math.max(1, count)
+      var devices = n - 1
+      var START = Math.PI * 5 / 6 // 150°
+      var SPREAD = Math.PI * 2 / 3 // 120°，从 150° 扫到 30°
+      var RATIO = 0.35 // 纵向压扁，呈扁扇形
+      var A = Math.max(cardW * 1.1, 220)
+      function fanPoints(a) {
+        var pts = []
+        if (!devices) return pts
+        for (var i = 0; i < devices; i++) {
+          var angle = devices === 1 ? Math.PI / 2 : (START - (i / (devices - 1)) * SPREAD)
+          pts.push([a * Math.cos(angle), RATIO * a * Math.sin(angle)])
+        }
+        return pts
+      }
+      var fan = fanPoints(A)
+      for (var tries = 0; tries < 400 && devices > 0 && ringHasOverlap(fan, cardW, cardH, GAP); tries++) {
+        A += 12
+        fan = fanPoints(A)
+      }
+      var pts = [[0, 0]].concat(fan)
+      var xs = pts.map(function (p) { return p[0] })
+      var ys = pts.map(function (p) { return p[1] })
+      var minX = Math.min.apply(null, xs) - cardW / 2
+      var maxX = Math.max.apply(null, xs) + cardW / 2
+      var minY = Math.min.apply(null, ys) - cardH / 2
+      var maxY = Math.max.apply(null, ys) + cardH / 2
+      var ox = -minX + PAD
+      var oy = -minY + PAD
+      var positions = pts.map(function (p) { return [Math.round(p[0] + ox), Math.round(p[1] + oy)] })
+      var W = Math.ceil(maxX - minX + PAD * 2)
+      var H = Math.ceil(maxY - minY + PAD * 2)
+      return { count: n, cardW: cardW, cardH: cardH, gap: GAP, W: W, H: H, positions: positions, edges: [], topDeviceY: positions.length ? positions[0][1] : 0, mode: 'devices-only', serverCenter: null }
+    }
     // 2026-11-10：一个服务器时用紧凑两排扇形，不再靠扩大半径防重叠
     // 服务器在上方居中；设备分两排（上排少、下排多），列距/行距按卡片尺寸，整体宽度接近双服务器布局。
     function layoutServerCenter(count, cardW, cardH, GAP, PAD) {
@@ -990,6 +1124,8 @@ body.light .dm-edge-label { stroke: rgba(255,255,255,.92); }
       if (override && override.cardH > 0) cardH = Math.ceil(override.cardH)
       var PAD = 16
       var serverCount = override && Number.isInteger(override.serverCount) ? override.serverCount : 2
+      // 2026-11-11：设备-only 拓扑（AI 网络2）用独立布局规则：本机居中 + 设备环绕，不留服务器位
+      if (override && override.devicesOnly) return layoutDevicesOnly(count, cardW, cardH, GAP, PAD)
       if (serverCount === 0) return layoutNodesOnly(count, cardW, cardH, GAP, PAD)
       var topTierH = Math.round(cardH * 1.1)
       var W, H, positions
@@ -1178,7 +1314,52 @@ function sakuraTunnelOf(data, devKey, peer) {
   }
   return null
 }
-// 设备状态 = 任一链路存活（全断才离线/红）
+// 2026-11-11：某台设备在 Sakura 账号里有哪些隧道（deviceKey / name / note 归一匹配），
+// 用于「一个设备有几条通道就画几条线」。
+function sakuraTunnelsForDevice(data, devKey) {
+  var acc = sakuraAccountOf(data)
+  if (!acc) return []
+  var key = peerDeviceKey(devKey)
+  var out = []
+  for (var i = 0; i < (acc.tunnels || []).length; i++) {
+    var t = acc.tunnels[i]
+    var dk = String(t.deviceKey || '').toLowerCase()
+    var mapped = null
+    if (dk === 'home1') mapped = 'home'
+    if (!mapped) {
+      var hay = (String(t.name || '') + ' ' + String(t.note || '')).toLowerCase()
+      else if (/company|公司1/.test(hay)) mapped = 'company'
+      else if (/home1|家里1|个人1/.test(hay)) mapped = 'home'
+      else if (/phone|手机/.test(hay)) mapped = 'phone-node'
+    }
+    if (mapped === key) out.push(t)
+  }
+  return out
+}
+// 设备当前实际走哪条通道（按 peer 端点判定），用于把「当前使用」那条加粗。
+function deviceActiveKind(data, node) {
+  var t = (node && node.tunnel) || {}
+  var host = String(t.host || '')
+  if (isLanPeer(node) || /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(host)) return 'lan'
+  var list = sakuraTunnelsForDevice(data, node && node.devKey)
+  for (var i = 0; i < list.length; i++) {
+    var x = list[i]
+    var rp = String(x.remotePort == null ? x.port || '' : x.remotePort)
+    if (String(x.host || '') === host && rp === String(t.port || '')) return 'sakura'
+  }
+  if (t.kind === 'frp' || t.kind === 'wan') return 'public'
+  return 'unknown'
+}
+// 2026-11-12（用户多次强调，规则已落盘 plugin/README.md）：局域网通道的悬浮地址/连线地址
+// 必须显示「局域网 IP:端口」，禁止用设备名/主机名（设备号:端口号）。IP 缺失时退化为「局域网:端口」。
+function lanAddrLabel(lt) {
+  lt = lt || {}
+  var host = String(lt.host || '')
+  var ip = String(lt.ip || '')
+  if (!ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) ip = host
+  var port = lt.port ? ':' + lt.port : ''
+  return ip ? ip + port : '局域网' + port
+}
 function deviceLinkState(data, peer, lanMap) {
   var dk = peerDeviceKey(peer.name)
   var t = peer.tunnel || {}
@@ -1252,6 +1433,8 @@ function deviceLinkState(data, peer, lanMap) {
       var layout = props.layout
       var lanNodes = props.lanNodes || []
       var show = props.show || { lan: true, public: true, sakura: true }
+      // 2026-11-11：「AI 网络2」沙箱变体 = 画板只保留设备节点（服务器/隧道节点与候选全部不渲染）
+      var devicesOnly = props.variant === 'v2'
       // 2026-11-09-v5：卡片宽度自适应 —— 每次渲染后测量真实尺寸，回传父组件重算布局；
       // 同时把每张卡的实际尺寸给连线用（不同卡片宽窄不同，连线端点贴各自边缘）。
       var cardRefs = useRef({})
@@ -1343,7 +1526,8 @@ function deviceLinkState(data, peer, lanMap) {
       function peerDomain(peer) {
         var t = peer.tunnel || {}
         if (!t.host) return '—'
-        return maskHost(t.host) + (t.port ? ':' + t.port : '') + (t.kind === 'lan' ? '（内网）' : '')
+        if (t.kind === 'lan') return lanAddrLabel(t) + '（内网）'
+        return maskHost(t.host) + (t.port ? ':' + t.port : '')
       }
 
       // LAN peer 单独收集（dedupe 后可能被更快的 frp 记录覆盖，但 LAN 线仍要画）
@@ -1375,6 +1559,34 @@ function deviceLinkState(data, peer, lanMap) {
     }
     if (cand) lanMap[pk] = { up: true, host: cand.address || cand.hostname, port: cand.port, ip: cand.address || cand.hostname, probe: { up: true } }
   })
+  // 2026-11-12：端口 chip = 「连过的 DSH 端口」并集（localStorage 历史 ∪ 当前报告）。
+  // 这样某台机某个实例掉线后端口仍占位显示红色，一眼看出「某端口掉了」。
+  var PORTS_STORE_KEY = 'dsh-mesh-ui.ports.v1'
+  function knownDevPorts(devKey, current) {
+    var key = String(devKey || '')
+    var store = {}
+    try { store = JSON.parse(localStorage.getItem(PORTS_STORE_KEY) || '{}') || {} } catch (e) { store = {} }
+    var curMap = {}
+    ;(current || []).forEach(function (p) { if (p && p.port) curMap[String(p.port)] = p })
+    var prev = Array.isArray(store[key]) ? store[key] : []
+    var all = {}
+    prev.forEach(function (p) { all[String(p)] = true })
+    Object.keys(curMap).forEach(function (p) { all[p] = true })
+    var list = Object.keys(all).map(Number).filter(function (p) { return p > 0 }).sort(function (a, b) { return a - b }).slice(0, 12)
+    try { store[key] = list; localStorage.setItem(PORTS_STORE_KEY, JSON.stringify(store)) } catch (e) { /* ignore */ }
+    return list.map(function (p) {
+      var c = curMap[String(p)]
+      return c ? { port: p, up: c.up, error: c.error || '' } : { port: p, up: false, error: '未探测到' }
+    })
+  }
+  var peerLinks = peers.map(function (peer) { return deviceLinkState(data, peer, lanMap) })
+  var portsByDev = {}
+  peers.forEach(function (peer, pi) {
+    var k = peerLinks[pi] && peerLinks[pi].devKey
+    if (!k) return
+    var list = portsByDev[k] || (portsByDev[k] = [])
+    ;(peer.instancesList || []).forEach(function (p) { list.push(p) })
+  })
   var nodes = [{
     key: 'local',
     local: true,
@@ -1382,10 +1594,10 @@ function deviceLinkState(data, peer, lanMap) {
     up: true,
     name: nodeDisplay(data.nodeName),
     dsh: localUp + '/' + instances.length,
-    ports: instances.map(function (inst) { return { port: inst.port, up: inst.up, error: inst.error || '' } }),
+    ports: knownDevPorts(peerDeviceKey(data.nodeName), instances.map(function (inst) { return { port: inst.port, up: inst.up, error: inst.error || '' } })),
     extra: ''
-  }].concat(peers.map(function (peer) {
-    var ls = deviceLinkState(data, peer, lanMap)
+  }].concat(peers.map(function (peer, pi) {
+    var ls = peerLinks[pi]
     return {
       key: 'peer:' + peer.name,
       local: false,
@@ -1398,12 +1610,12 @@ function deviceLinkState(data, peer, lanMap) {
       lanTunnel: ls.lanTunnel,
       name: nodeDisplay(ls.devKey),
       dsh: String(peer.instancesCount || 0),
-      ports: peer.instancesList || [],
+      ports: knownDevPorts(ls.devKey, portsByDev[ls.devKey] || []),
       latencyMs: peer.latencyMs,
       tunnel: peer.tunnel || {},
       error: peer.error || ''
     }
-  })).concat(visibleSakuraCandidates().map(function (c) {
+  })).concat(devicesOnly ? [] : visibleSakuraCandidates().map(function (c) {
     return {
       key: 'candidate:' + c.key,
       candidate: true,
@@ -1419,13 +1631,14 @@ function deviceLinkState(data, peer, lanMap) {
     }
   }))
   // 默认布局的交叉削减：按邻接服务器做 barycenter 排序，左侧公网 / 右侧 Sakura，本机放中间
-  var orderKeys = orderedNodeKeys(data)
+  var orderKeys = devicesOnly ? deviceOnlyNodeKeys(data) : orderedNodeKeys(data)
   nodes.sort(function (a, b) { return orderKeys.indexOf(a.key) - orderKeys.indexOf(b.key) })
   // 基础设施节点（中转服务器）：阿里云 / 樱花
   var localPub = publicEntryFor(localTunnel)
   var selectedPublic = selectedPublicServer()
   if (selectedPublic) localPub = selectedPublic
-  var hasPublic = Boolean(localPub) || Boolean(selectedPublic) || peers.some(function (p) { var pt = p.tunnel || {}; return !sakuraTunnelOf(data, peerDeviceKey(p.name), p) && !isLanPeer(p) && Boolean(pt.host) && (pt.kind === 'frp' || pt.kind === 'wan') })
+  // 2026-11-11 用户语义：公网服务器节点只有用户“加入拓扑”后才显示，不从 peer 隧道自动推导
+  var hasPublic = Boolean(selectedPublic)
   var publicVisible = show.public && hasPublic
   var sakuraRaw = sakuraAccountOf(data)
   var selectedSakuraList = selectedSakuraServers()
@@ -1517,9 +1730,20 @@ function deviceLinkState(data, peer, lanMap) {
     if (changed) setInfraSizes(next)
   })
   function sizeOf(key) { return cardSizes[key] || infraSizes[key] || { w: layout.cardW, h: layout.cardH } }
-  function curve(key, from, to, up, transport, label, fromSize, toSize, highlight) {
+  function curve(key, from, to, up, transport, label, fromSize, toSize, highlight, offset, width, opacity) {
     var a = edgePoint(from, to, fromSize.w / 2, fromSize.h / 2)
     var b = edgePoint(to, from, toSize.w / 2, toSize.h / 2)
+    // 多通道并排：沿垂直方向平移线段（正数向行进方向左侧），让同一设备的几条通道并在一起但不重叠
+    var off = Number(offset) || 0
+    if (off) {
+      var odx = b[0] - a[0]
+      var ody = b[1] - a[1]
+      var olen = Math.sqrt(odx * odx + ody * ody) || 1
+      var onx = -ody / olen
+      var ony = odx / olen
+      a = [a[0] + onx * off, a[1] + ony * off]
+      b = [b[0] + onx * off, b[1] + ony * off]
+    }
     var mx = (a[0] + b[0]) / 2
     var my = (a[1] + b[1]) / 2
     var dx = b[0] - a[0]
@@ -1529,15 +1753,17 @@ function deviceLinkState(data, peer, lanMap) {
     var color = up ? transport.color : DOWN_COLOR
     var dash = up ? (transport.dash ? '6 5' : 'none') : '6 5'
     var related = highlight !== false
+    var strokeW = width == null ? 1.8 : width
+    var baseOpacity = opacity == null ? 1 : opacity
     var els = [h('path', {
       key: key,
       d: 'M ' + a[0] + ' ' + a[1] + ' Q ' + (mx + (-dy / len) * bow) + ' ' + (my + (dx / len) * bow) + ' ' + b[0] + ' ' + b[1],
-      fill: 'none', stroke: color, strokeWidth: 1.8, strokeDasharray: dash,
+      fill: 'none', stroke: color, strokeWidth: strokeW, strokeDasharray: dash,
       className: up ? (transport.dash ? 'dm-edge-frp' : 'dm-edge-solid') : 'dm-edge-down',
-      opacity: related ? 1 : 0.12
+      opacity: (related ? 1 : 0.12) * baseOpacity
     })]
     if (label) {
-      els.push(h('text', { key: key + '-t', className: 'dm-edge-label', x: mx + (-dy / len) * bow, y: my + (dx / len) * bow - 4, fill: color, fontSize: 9, textAnchor: 'middle', style: { display: (hoverKey && related) ? 'block' : 'none' } }, label))
+      els.push(h('text', { key: key + '-t', className: 'dm-edge-label', x: mx + (-dy / len) * (bow + off * 0.2), y: my + (dx / len) * (bow + off * 0.2) - 6, fill: color, fontSize: 12, textAnchor: 'middle', style: { display: (hoverKey && related) ? 'block' : 'none' } }, label))
     }
     return els
   }
@@ -1549,7 +1775,7 @@ function deviceLinkState(data, peer, lanMap) {
   var infraBoxes = []
   if (publicVisible) infraBoxes.push({ x: aliyunPos[0], y: aliyunPos[1], w: aliyunSize.w, h: aliyunSize.h })
   if (sakuraVisible) infraBoxes.push({ x: sakuraPos[0], y: sakuraPos[1], w: sakuraSize.w, h: sakuraSize.h })
-  if (props.onInfraBounds) props.onInfraBounds(infraBoxes)
+  if (props.onInfraBounds) props.onInfraBounds(devicesOnly ? [] : infraBoxes)
   var localKey = peerDeviceKey(data.nodeName)
   var firstMeshTunnel = selectedSakuraList.length && selectedSakuraList[0].mesh && selectedSakuraList[0].mesh[0] ? selectedSakuraList[0].mesh[0] : null
   var localSak = selectedSakura
@@ -1558,26 +1784,79 @@ function deviceLinkState(data, peer, lanMap) {
   // 2026-11-10：LAN 线必须从本机节点出发（排序后 local 可能不在 index 0，之前误连到peer-x）
   var localNodeIdx = 0
   nodes.forEach(function (n, ii) { if (n.local) localNodeIdx = ii })
+  // 2026-11-11：多通道信息不在线上写文字（会和并排线叠在一起），改成悬浮设备时的堆叠信息卡
+  var deviceChannels = {}
   nodes.forEach(function (n, i) {
     var pa = layout.positions[i]
     if (n.local) {
-      // 主机自己的两条上级链路：自建 frps（阿里云） + 本机樱花隧道
-      if (publicVisible && localPub) svgEls = svgEls.concat(curve('pub-local', pa, aliyunPos, true, TRANSPORTS.public, maskHost(localPub.host) + ':' + localPub.port, sizeOf('local'), aliyunSize, edgeRelated('local', 'server-aliyun')))
-      if (sakuraVisible && localSak) svgEls = svgEls.concat(curve('sak-local', pa, sakuraPos, localSak.online === true, TRANSPORTS.sakura, maskText(localSak.addr || ''), sizeOf('local'), sakuraSize, edgeRelated('local', 'server-sakura')))
+      // 主机自己的两条上级链路：自建 frps（阿里云） + 本机樱花隧道（沙箱变体不画）
+      if (!devicesOnly && publicVisible && localPub) svgEls = svgEls.concat(curve('pub-local', pa, aliyunPos, true, TRANSPORTS.public, maskHost(localPub.host) + ':' + localPub.port, sizeOf('local'), aliyunSize, edgeRelated('local', 'server-aliyun')))
+      if (!devicesOnly && sakuraVisible && localSak) svgEls = svgEls.concat(curve('sak-local', pa, sakuraPos, localSak.online === true, TRANSPORTS.sakura, maskText(localSak.addr || ''), sizeOf('local'), sakuraSize, edgeRelated('local', 'server-sakura')))
       return
     }
     var sizeN = sizeOf(n.key)
-    // Sakura 服务器未加入拓扑时，peer 仍然通过 Sakura 隧道连到本机；不画这条边会让 peer 子树变成独立树
-    if (!sakuraVisible && !n.lanUp && n.sakuraTunnel) {
-      var directTunnel = publicVisible
-        ? { label: '公网', short: 'PUB', color: TRANSPORTS.public.color, dash: true }
-        : { label: '未显示', short: 'LINK', color: '#8b949e', dash: true }
-      svgEls = svgEls.concat(curve('sak-direct' + i, layout.positions[localNodeIdx], pa, n.sakuraUp === true, directTunnel, publicVisible ? '公网' : '', sizeOf('local'), sizeN, edgeRelated('local', n.key)))
+    if (devicesOnly) {
+      // 2026-11-11：一个设备有几条通道就画几条线（公网 / 内网穿透-Sakura / 局域网），
+      // 同方向并排捆在一起；当前使用的通道加粗，可用但未启用的通道细且半透明。
+      var ltDev = n.lanTunnel || {}
+      // 2026-11-12：按设备聚合「所有 peer 记录」来判定通道——同一设备可能同时有公网 + 局域网 peer，
+      // 只取去重后的单条记录会把公网线弄丢（用户反馈peer-x公网连接消失）。
+      var chanDevKey = peerDeviceKey(n.devKey || n.name)
+      var recWan = null
+      var recLan = null
+      ;((data && data.peers) || []).forEach(function (p) {
+        if (peerDeviceKey(p.name) !== chanDevKey) return
+        var t = p.tunnel || {}
+        if (t.kind === 'frp' || t.kind === 'wan') { if (!recWan || (p.up && !recWan.up)) recWan = p }
+        if (t.kind === 'lan' || /\/\/(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(String(p.url || ''))) { if (!recLan || (p.up && !recLan.up)) recLan = p }
+      })
+      var activeKind = deviceActiveKind(data, n)
+      var sakuraList = sakuraTunnelsForDevice(data, n.devKey)
+      var channels = []
+      if (n.lanUp || recLan) {
+        var ltLan = (recLan && recLan.tunnel) || ltDev
+        var lanChanUp = recLan ? Boolean(recLan.up || (ltLan.probe && ltLan.probe.up === true)) : (ltDev.probe ? ltDev.probe.up === true : true)
+        channels.push({ kind: 'lan', transport: TRANSPORTS.lan, label: lanAddrLabel(ltLan), up: lanChanUp, active: activeKind === 'lan' })
+      }
+      sakuraList.forEach(function (tun) {
+        var rp = String(tun.remotePort == null ? tun.port || '' : tun.remotePort)
+        channels.push({
+          kind: 'sakura',
+          transport: TRANSPORTS.sakura,
+          label: maskHost(String(tun.host || '')) + (rp ? ':' + rp : ''),
+          up: tun.online === true,
+          active: activeKind === 'sakura' && String(tun.host || '') === String((n.tunnel || {}).host || '') && rp === String((n.tunnel || {}).port || '')
+        })
+      })
+      var pubRec = recWan
+      if (!pubRec && n.tunnel && (n.tunnel.kind === 'frp' || n.tunnel.kind === 'wan')) pubRec = { tunnel: n.tunnel, up: n.publicUp !== false }
+      if (pubRec && activeKind !== 'sakura') {
+        var wt = pubRec.tunnel || {}
+        var pubUp = pubRec.up !== false && !(wt.probe && wt.probe.up === false)
+        channels.push({ kind: 'public', transport: TRANSPORTS.public, label: maskHost(wt.host || '') + (wt.port ? ':' + wt.port : ''), up: pubUp, active: activeKind === 'public' })
+      }
+      if (!channels.length) channels.push({ kind: 'public', transport: TRANSPORTS.public, label: '', up: n.up, active: true })
+      deviceChannels[n.key] = channels
+      var spacing = 7
+      channels.forEach(function (ch, ci) {
+        var off = (ci - (channels.length - 1) / 2) * spacing
+        // 线上不再写地址文字（并排会叠字），地址在悬浮信息卡里显示
+        svgEls = svgEls.concat(curve('dev' + i + '-' + ch.kind, layout.positions[localNodeIdx], pa, ch.up, ch.transport, '', sizeOf('local'), sizeN, edgeRelated('local', n.key), off, 2, ch.active ? 1 : 0.7))
+      })
+      return
     }
-    if (publicVisible && !n.lanUp && !n.sakuraTunnel && n.tunnel && n.tunnel.host && !isLanPeer(n) && (n.tunnel.kind === 'frp' || n.tunnel.kind === 'wan')) svgEls = svgEls.concat(curve('pub' + i, pa, aliyunPos, n.publicUp, TRANSPORTS.public, maskHost(n.tunnel.host) + ((n.tunnel.port) ? ':' + n.tunnel.port : ''), sizeN, aliyunSize, edgeRelated(n.key, 'server-aliyun')))
+    var tunnelKind = (n.tunnel || {}).kind
+    var peerIsPublic = tunnelKind === 'frp' || tunnelKind === 'wan'
+    // 2026-11-11 用户语义：链路类型只按“已加入拓扑的服务器视图”显示；
+    // LAN 优先；Sakura/公网服务器未加入时不猜测传输方式，画中性“未显示”边避免节点悬空。
+    var hasVisibleKind = Boolean(n.lanUp) || Boolean(sakuraVisible && n.sakuraTunnel) || Boolean(publicVisible && peerIsPublic && !n.sakuraTunnel)
+    if (!hasVisibleKind && !n.candidate) {
+      svgEls = svgEls.concat(curve('link' + i, layout.positions[localNodeIdx], pa, n.up, TRANSPORTS.public, '', sizeOf('local'), sizeN, edgeRelated('local', n.key)))
+    }
+    if (publicVisible && !n.lanUp && !n.sakuraTunnel && n.tunnel && n.tunnel.host && !isLanPeer(n) && peerIsPublic) svgEls = svgEls.concat(curve('pub' + i, pa, aliyunPos, n.publicUp, TRANSPORTS.public, maskHost(n.tunnel.host) + ((n.tunnel.port) ? ':' + n.tunnel.port : ''), sizeN, aliyunSize, edgeRelated(n.key, 'server-aliyun')))
     if (sakuraVisible && !n.lanUp && n.sakuraTunnel) svgEls = svgEls.concat(curve('sak' + i, pa, sakuraPos, n.sakuraUp === true, TRANSPORTS.sakura, maskText(n.sakuraTunnel.addr || ''), sizeN, sakuraSize, edgeRelated(n.key, 'server-sakura')))
     if (sakuraVisible && n.candidate) svgEls = svgEls.concat(curve('cand' + i, pa, sakuraPos, false, TRANSPORTS.sakura, maskText(n.tunnel.addr || ''), sizeN, sakuraSize, edgeRelated(n.key, 'server-sakura')))
-    if (show.lan && n.lanUp) { var lt = n.lanTunnel || {}; var lanAddr = (lt.ip || lt.host || 'LAN') + (lt.port ? ':' + lt.port : ''); svgEls = svgEls.concat(curve('lan' + i, layout.positions[localNodeIdx], pa, n.lanUp, TRANSPORTS.lan, lanAddr, sizeOf('local'), sizeN, edgeRelated('local', n.key))) }
+    if (show.lan && n.lanUp) { var lt = n.lanTunnel || {}; var lanAddr = lanAddrLabel(lt); svgEls = svgEls.concat(curve('lan' + i, layout.positions[localNodeIdx], pa, n.lanUp, TRANSPORTS.lan, lanAddr, sizeOf('local'), sizeN, edgeRelated('local', n.key))) }
   })
   return h('div', null,
     h('svg', { className: 'dm-lines', width: layout.W, height: layout.H, viewBox: '0 0 ' + layout.W + ' ' + layout.H }, svgEls),
@@ -1586,15 +1865,14 @@ function deviceLinkState(data, peer, lanMap) {
       var selected = props.selectedKey === node.key
       var linkKinds = []
       if (!node.local && !node.candidate) {
-        if (node.lanUp) linkKinds.push('LAN')
-        else if (node.sakuraTunnel) {
-          if (sakuraVisible) linkKinds.push('Sakura')
-          else if (publicVisible) linkKinds.push('公网')
-        } else {
+        // 沙箱只删服务器/隧道节点，链路类型的显示口径与默认页保持一致
+        if (node.lanUp) linkKinds.push({ kind: 'lan', label: '局域网' })
+        else if (node.sakuraTunnel) linkKinds.push({ kind: 'public', label: '公网' })
+        else {
           var lt = node.tunnel || {}
-          if (!node.lanUp && publicVisible && (lt.kind === 'frp' || lt.kind === 'wan')) linkKinds.push('公网')
+          if (publicVisible && (lt.kind === 'frp' || lt.kind === 'wan')) linkKinds.push({ kind: 'public', label: '公网' })
         }
-        if (!linkKinds.length) linkKinds.push('未显示')
+        if (!linkKinds.length) linkKinds.push({ kind: 'public', label: '公网' })
       }
       return h('div', {
         key: node.key,
@@ -1610,22 +1888,70 @@ function deviceLinkState(data, peer, lanMap) {
         title: '拖拽调整位置 · 单击查看 ' + node.name + ' 的详情'
       },
         h('div', { className: 'dm-n-head' },
-          h('div', { className: 'dm-n-name' }, h('span', { className: 'dm-dot ' + (node.up ? 'ok' : 'bad') }), h('span', { className: 'dm-ell' }, node.name)),
+          h('div', { className: 'dm-n-name' },
+            h('span', { className: 'dm-dot ' + (node.up ? 'ok' : 'bad') }),
+            devicesOnly ? deviceTypeIcon(deviceType(node.devKey)) : null,
+            h('span', { className: 'dm-ell' }, devicesOnly ? nodeLabel(node.devKey) : node.name)
+          ),
           node.local ? h('span', { className: 'dm-chip ok' }, '本机')
             : (node.up ? h('span', { className: 'dm-extra' }, node.latencyMs == null ? '' : node.latencyMs + 'ms') : h('span', { className: 'dm-chip bad' }, '离线'))
         ),
         node.up ? null : h('div', { className: 'dm-offline-row' }, '全部链路不可用' + (node.error ? ' · ' + node.error : '')),
         h('div', { className: 'dm-card-dsh' },
-          linkKinds.length ? h('span', { className: 'dm-chip link' }, linkKinds.join(' / ')) : null,
+          linkKinds.map(function (k, ki) {
+            // 2026-11-12 用户要求：公网 tag 蓝色、局域网 tag 紫色
+            return h('span', { key: ki, className: 'dm-chip link ' + (k.kind === 'lan' ? 'lan' : 'public'), style: { color: k.kind === 'lan' ? '#a371f7' : '#4d9bff', borderColor: k.kind === 'lan' ? 'rgba(163,113,247,.55)' : 'rgba(77,155,255,.55)' } }, k.label)
+          }),
           (node.ports || []).map(function (item, pi) {
             var portUp = item.up == null ? node.up : Boolean(item.up)
-            var bridgeUnknown = !portUp && node.up && !node.local
-            return h('span', { key: pi, className: 'dm-chip type' + (portUp ? ' run' : (bridgeUnknown ? ' warn' : ' bad')), title: (portUp ? '实例在线' : (bridgeUnknown ? '节点在线，但 host bridge 未连接，实例状态未知' : (item.error ? 'host bridge 不可达：' + item.error : '实例离线 / host bridge 未连接'))) + ' · DSH 端口 ' + item.port }, String(item.port))
+            return h('span', { key: pi, className: 'dm-chip type' + (portUp ? ' run' : ' bad'), title: (portUp ? '端口在线' : (item.error ? '端口不可达：' + item.error : '端口离线')) + ' · DSH 端口 ' + item.port }, String(item.port))
           })
         )
       )
     }),
-    (publicVisible ? h('div', {
+    (devicesOnly && hoverKey ? (function () {
+      var hoveredNode = null
+      for (var ni = 0; ni < nodes.length; ni++) if (nodes[ni].key === hoverKey) hoveredNode = nodes[ni]
+      if (!hoveredNode) return null
+      var chanLabels = { lan: '局域网', sakura: '公网', public: '公网', unknown: '公网' }
+      function chanRow(ch, key) {
+        // 2026-11-12：通道不可用（up === false）时，圆点与地址文字变红 + 标「离线」，
+        // 方便悬浮时一眼看出是哪一条通道断了（线本身也会变红）。
+        var down = ch.up === false
+        return h('div', { className: 'dm-chan-row' + (down ? ' down' : ''), key: key },
+          h('span', { className: 'dm-chan-dot', style: { background: down ? '#e5534b' : ch.transport.color } }),
+          h('span', { className: 'dm-chan-kind' }, chanLabels[ch.kind] || ch.kind),
+          h('span', { className: 'dm-chan-addr' }, ch.label || '—'),
+          down ? h('span', { className: 'dm-chan-down' }, '离线') : null
+        )
+      }
+      // 2026-11-11：悬浮本机（主机）时，其它几台设备“同时”各自弹出自己的信息卡，本机本身不变；
+      // 悬浮某台设备时，只弹它自己的。
+      var targets = []
+      for (var ti = 0; ti < nodes.length; ti++) {
+        var node = nodes[ti]
+        if (node.local || node.candidate || !deviceChannels[node.key]) continue
+        if (hoveredNode.local || node.key === hoveredNode.key) targets.push(node)
+      }
+      var tips = []
+      for (var ki = 0; ki < targets.length; ki++) {
+        var target = targets[ki]
+        var idx = -1
+        for (var pi = 0; pi < nodes.length; pi++) if (nodes[pi].key === target.key) idx = pi
+        if (idx < 0) continue
+        var pos = layout.positions[idx]
+        tips.push(h('div', {
+          className: 'dm-chan-tip',
+          key: 'chan-tip-' + target.key,
+          style: { left: pos[0] + 'px', top: Math.round(pos[1] + sizeOf(target.key).h / 2 + 12) + 'px' }
+        },
+          h('div', { className: 'dm-chan-tip-h' }, target.name),
+          deviceChannels[target.key].map(function (ch, ci) { return chanRow(ch, 'ch' + ci) })
+        ))
+      }
+      return tips.length ? tips : null
+    })() : null),
+    (!devicesOnly && publicVisible ? h('div', {
       key: 'server-aliyun',
       className: 'dm-card-node server' + (infra[0].up ? '' : ' down') + (hoverKey === 'server-aliyun' ? ' hovered' : ''),
       onMouseEnter: function () { setHoverKey('server-aliyun') },
@@ -1641,7 +1967,7 @@ function deviceLinkState(data, peer, lanMap) {
       h('div', { className: 'dm-card-domain' }, infra[0].host),
       h('div', { className: 'dm-card-dsh' }, h('span', { className: 'dm-chip', style: { borderColor: TRANSPORTS.public.color, color: TRANSPORTS.public.color } }, 'frps'), h('span', { className: 'dm-chip' }, infra[0].detail))
     ) : null),
-    (sakuraVisible ? h('div', {
+    (!devicesOnly && sakuraVisible ? h('div', {
       key: 'server-sakura',
       className: 'dm-card-node server' + (infra[1].up ? '' : ' down') + (hoverKey === 'server-sakura' ? ' hovered' : ''),
       onMouseEnter: function () { setHoverKey('server-sakura') },
@@ -1850,21 +2176,30 @@ function deviceLinkState(data, peer, lanMap) {
     function InstanceList(props) {
       var instances = (props.data.local && props.data.local.instances) || []
       if (!instances.length) return h('div', { className: 'dm-empty' }, '无本机实例数据')
-      return h('div', null, instances.map(function (inst) {
-        var model = inst.model ? (inst.model.provider || '') + ' / ' + (inst.model.model || '') : '—'
-        return h('div', { className: 'dm-instrow', key: inst.id },
-          h('div', { style: { minWidth: 0 } },
-            h('div', { style: { fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 } }, h('span', { className: 'dm-dot ' + (inst.up ? 'ok' : 'bad') }), inst.id),
-            h('div', { className: 'dm-sub', style: { marginTop: 1 } }, model)
-          ),
-          h('div', { className: 'dm-mini', style: { marginTop: 0 } },
-            h('span', { className: 'dm-chip' }, 'pid ' + (inst.pid == null ? '—' : inst.pid)),
-            h('span', { className: 'dm-chip' }, 'tools ' + (inst.tools == null ? '—' : inst.tools)),
-            h('span', { className: 'dm-chip' }, '会话 ' + (inst.sessions || 0)),
-            h('span', { className: 'dm-chip' + (inst.running ? ' run' : '') }, '运行 ' + (inst.running || 0))
+      return h('div', { className: 'dm-table-wrap' }, h('table', { className: 'dm-data-table' },
+        h('colgroup', null,
+          h('col', { style: { width: '110px' } }),
+          h('col', null),
+          h('col', { style: { width: '70px' } }),
+          h('col', { style: { width: '60px' } }),
+          h('col', { style: { width: '60px' } }),
+          h('col', { style: { width: '60px' } })
+        ),
+        h('thead', null, h('tr', null,
+          h('th', null, '实例'), h('th', null, '模型'), h('th', null, 'pid'), h('th', null, 'tools'), h('th', null, '会话'), h('th', null, '运行')
+        )),
+        h('tbody', null, instances.map(function (inst) {
+          var model = inst.model ? (inst.model.provider || '') + ' / ' + (inst.model.model || '') : '—'
+          return h('tr', { key: inst.id },
+            h('td', null, h('span', { className: 'dm-dot ' + (inst.up ? 'ok' : 'bad') }), ' ', inst.id),
+            h('td', { className: 'dm-sub', title: model }, model),
+            h('td', { className: 'dm-mono' }, inst.pid == null ? '—' : String(inst.pid)),
+            h('td', null, inst.tools == null ? '—' : String(inst.tools)),
+            h('td', null, String(inst.sessions || 0)),
+            h('td', null, String(inst.running || 0))
           )
-        )
-      }))
+        }))
+      ))
     }
 
     function DelegationTable(props) {
@@ -1876,7 +2211,14 @@ function deviceLinkState(data, peer, lanMap) {
         h('div', { className: 'dm-sub', style: { marginBottom: 5 } }, '共 ' + (d.total || 0) + ' 条 · ' + Object.keys(stats).map(function (k) { return k + ' ' + stats[k] }).join(' · ')),
         // 2026-11-10：外层给横向滚动兜底——栏窄到连固定列宽都放不下时滚动，而不是压缩成竖排。
         h('div', { className: 'dm-table-wrap' },
-          h('table', { className: 'dm-table' },
+          h('table', { className: 'dm-data-table' },
+            h('colgroup', null,
+              h('col', { style: { width: '64px' } }),
+              h('col', { style: { width: '96px' } }),
+              h('col', { style: { width: '120px' } }),
+              h('col', { style: { width: '72px' } }),
+              h('col', null)
+            ),
             h('thead', null, h('tr', null, h('th', null, '状态'), h('th', null, '节点'), h('th', null, '任务'), h('th', null, '耗时'), h('th', null, '目标'))),
             h('tbody', null, list.map(function (task) {
               return h('tr', { key: task.taskId },
@@ -1884,7 +2226,7 @@ function deviceLinkState(data, peer, lanMap) {
                 h('td', { title: nodeLabel(task.node) }, nodeLabel(task.node)),
                 h('td', { className: 'dm-mono', style: { fontSize: 11 }, title: String(task.taskId || '') }, String(task.taskId || '').replace(/^T-\d{8}-/, 'T-…')),
                 h('td', { className: 'dm-mono' }, dur(task.durationSec)),
-                h('td', null, h('span', { className: 'dm-trunc', title: task.goal }, task.goal || ''))
+                h('td', { title: task.goal }, task.goal || '')
               )
             }))
           )
@@ -1897,18 +2239,26 @@ function deviceLinkState(data, peer, lanMap) {
       var latest = alerts.latest
       var history = (alerts.history || []).filter(function (item) { return !latest || item.at !== latest.at }).slice().reverse()
       if (!latest && !history.length) return h('div', { className: 'dm-empty' }, '没有告警记录')
-      return h('div', null,
-        latest ? h('div', { className: 'dm-alertrow' },
-          h('span', { className: 'dm-chip bad' }, latest.kind || 'alert'),
-          h('span', null, h('span', { className: 'dm-mono' }, latest.at), ' · ', latest.summary || '', latest.consecutiveBad ? ' · 连续 ' + latest.consecutiveBad + ' 次' : '')
-        ) : null,
-        history.slice(0, 6).map(function (item, i) {
-          return h('div', { className: 'dm-alertrow', key: i, style: { opacity: 0.75 } },
-            h('span', { className: 'dm-chip' }, item.kind || '?'),
-            h('span', null, h('span', { className: 'dm-mono' }, item.at || ''), ' · ', item.summary || '')
+      var rows = []
+      if (latest) rows.push({ kind: latest.kind || 'alert', at: latest.at || '', summary: latest.summary || '', extra: latest.consecutiveBad ? ' · 连续 ' + latest.consecutiveBad + ' 次' : '', current: true })
+      history.slice(0, 6).forEach(function (item) { rows.push({ kind: item.kind || '?', at: item.at || '', summary: item.summary || '', extra: '', current: false }) })
+      return h('div', { className: 'dm-table-wrap' }, h('table', { className: 'dm-data-table' },
+        h('colgroup', null,
+          h('col', { style: { width: '64px' } }),
+          h('col', { style: { width: '150px' } }),
+          h('col', { style: { width: '96px' } }),
+          h('col', null)
+        ),
+        h('thead', null, h('tr', null, h('th', null, '状态'), h('th', null, '时间'), h('th', null, '类型'), h('th', null, '内容'))),
+        h('tbody', null, rows.map(function (row, i) {
+          return h('tr', { key: i, style: row.current ? undefined : { opacity: 0.75 } },
+            h('td', null, h('span', { className: 'dm-chip ' + (row.current ? 'bad' : 'muted') }, row.current ? '当前' : '历史')),
+            h('td', { className: 'dm-mono', title: row.at }, row.at ? clockText(row.at) : '—'),
+            h('td', { title: row.kind }, row.kind),
+            h('td', { title: row.summary + row.extra }, row.summary + row.extra)
           )
-        })
-      )
+        }))
+      ))
     }
 
     function jsonFetch(url, options) {
@@ -1917,6 +2267,36 @@ function deviceLinkState(data, peer, lanMap) {
 
     // 2026-11-10：节点管理（从本机移除 peer / 吊销入站 token）。
     // 2026-11-11：节点管理（只列设备；移除仅本机生效，跨设备同步待定）
+    // 2026-11-12（用户多次强调，规则见 plugin/README.md）：节点管理/表格的地址列一律显示「IP:端口」，
+    // 禁止主机名/设备名。优先用服务端解析好的 peer.ip；URL 本身就是 IP 时直接用；都拿不到显示「IP 未解析」。
+    function peerAddrText(peer) {
+      var ip = String((peer && peer.ip) || '')
+      var port = String((peer && peer.port) || '')
+      if (!ip) {
+        try {
+          var u = new URL(String((peer && peer.url) || ''))
+          var host = u.hostname
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) { ip = host; port = port || u.port }
+        } catch (e) { /* ignore */ }
+      }
+      if (!ip) return 'IP 未解析'
+      return maskHost(ip) + (port ? ':' + port : '')
+    }
+    // 2026-11-12（用户强调）：局域网扫描表格的地址列也显示「IP:端口」，不显示 URL/主机名。
+    function lanScanAddr(node) {
+      var ip = String((node && node.address) || '')
+      var port = ''
+      try {
+        var u = new URL(String((node && node.url) || ''))
+        port = u.port || ''
+        if (!ip) {
+          var host = u.hostname
+          if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) ip = host
+        }
+      } catch (e) { /* ignore */ }
+      if (!ip) return 'IP 未解析'
+      return ip + (port ? ':' + port : '')
+    }
     function NodeManager(props) {
       var sp = useState(null); var peers = sp[0]; var setPeers = sp[1]
       var sb = useState(false); var busy = sb[0]; var setBusy = sb[1]
@@ -1931,44 +2311,79 @@ function deviceLinkState(data, peer, lanMap) {
         }).catch(function (e) { setMsg(String(e.message || e)) }).finally(function () { setBusy(false) })
       }
       useEffect(function () { refresh() }, [])
-      function togglePeer(peer) {
-        var nextDisabled = !peer.disabled
-        setBusy(true); setMsg('')
-        jsonFetch('/api/dsh-mesh/peers/toggle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: peer.id, disabled: nextDisabled }) })
-          .then(function (j) {
-            if (j.ok) {
-              var list = disabledPeerNames().filter(function (x) { return x !== peer.name && x !== peer.id })
-              if (nextDisabled) list.push(peer.name || peer.id)
-              setDisabledPeerNames(list)
-              setMsg(nextDisabled ? '已禁用 ' + peer.name : '已启用 ' + peer.name)
-            } else setMsg('操作失败：' + (j.stderr || j.error || '').slice(0, 200))
-            refresh(); if (props.onChanged) props.onChanged()
-          })
-          .catch(function (e) { setMsg(String(e.message || e)) }).finally(function () { setBusy(false) })
+      // 2026-11-12：同一台设备可能有多条连接记录（home / home-exec、company / company-exec …），
+      // 节点管理按「设备」归并，数量和拓扑图（同样按设备去重）保持一致，名称用固定中文设备名。
+      function deviceGroups() {
+        var map = {}
+        var order = []
+        ;(peers || []).forEach(function (peer) {
+          var key = peerDeviceKey(peer.name)
+          if (!map[key]) { map[key] = { key: key, name: nodeDisplay(key), ids: [], urls: [], records: 0, disabled: true }; order.push(key) }
+          var group = map[key]
+          group.ids.push(peer.id)
+          group.records += 1
+          var url = peerAddrText(peer)
+          if (url && group.urls.indexOf(url) < 0) group.urls.push(url)
+          if (!peer.disabled) group.disabled = false
+        })
+        return order.map(function (k) { return map[k] })
       }
-      function removePeer(peer) {
-        if (!window.confirm('从当前网络移除设备「' + peer.name + '」？\n\n注意：目前只移除本机与它的连接，不会同步通知其他设备；多设备同步待实现。')) return
-        setBusy(true); setMsg('')
-        jsonFetch('/api/dsh-mesh/peers/remove', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: peer.id }) })
-          .then(function (j) { setMsg(j.ok ? '已从本机移除 ' + peer.name : ('移除失败：' + (j.stderr || j.error || '').slice(0, 200))); refresh(); if (props.onChanged) props.onChanged() })
-          .catch(function (e) { setMsg(String(e.message || e)) }).finally(function () { setBusy(false) })
+      function runSequential(ids, fn) {
+        return ids.reduce(function (p, id) { return p.then(function () { return fn(id) }) }, Promise.resolve())
       }
+      function toggleDevice(group) {
+        var nextDisabled = !group.disabled
+        setBusy(true); setMsg('')
+        runSequential(group.ids, function (id) {
+          return jsonFetch('/api/dsh-mesh/peers/toggle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: id, disabled: nextDisabled }) })
+        }).then(function () {
+          setMsg((nextDisabled ? '已禁用 ' : '已启用 ') + group.name + '（' + group.records + ' 条连接记录）')
+          refresh(); if (props.onChanged) props.onChanged()
+        }).catch(function (e) { setMsg(String(e.message || e)) }).finally(function () { setBusy(false) })
+      }
+      function removeDevice(group) {
+        if (!window.confirm('从本机移除设备「' + group.name + '」（共 ' + group.records + ' 条连接记录）？\n\n注意：目前只移除本机与它的连接，不会同步通知其他设备；多设备同步待实现。')) return
+        setBusy(true); setMsg('')
+        runSequential(group.ids, function (id) {
+          return jsonFetch('/api/dsh-mesh/peers/remove', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: id }) })
+        }).then(function () {
+          setMsg('已从本机移除 ' + group.name)
+          refresh(); if (props.onChanged) props.onChanged()
+        }).catch(function (e) { setMsg(String(e.message || e)) }).finally(function () { setBusy(false) })
+      }
+      var groups = peers === null ? null : deviceGroups()
+      var totalRecords = (peers || []).length
       return h('div', { className: 'dm-nodes' },
         h('div', { className: 'dm-lan-row' },
           h('button', { className: 'dm-btn', disabled: busy, onClick: refresh }, '刷新设备'),
-          h('span', { className: 'dm-sub' }, '仅列出设备节点；移除只影响本机，跨设备同步暂未实现。')
+          h('span', { className: 'dm-sub' }, '共 ' + (groups ? groups.length : '—') + ' 台设备 · ' + totalRecords + ' 条连接记录（同一设备的多个入口已合并；本机不在列表内）；移除只影响本机。')
         ),
         msg ? h('div', { className: 'dm-sub', style: { marginTop: 6 } }, msg) : null,
-        peers === null ? h('div', { className: 'dm-sub' }, '加载中…') :
-          peers.length ? peers.map(function (peer) {
-            return h('div', { className: 'dm-node-row', key: peer.id },
-              h('span', { className: 'dm-dot ' + (peer.disabled ? 'muted' : 'ok'), style: peer.disabled ? { opacity: .4 } : undefined }),
-              h('span', { className: 'dm-node-name' }, peer.name + (peer.disabled ? '（已禁用）' : '')),
-              h('span', { className: 'dm-node-url' }, maskText(peer.url || '')),
-              h('button', { className: 'dm-btn', disabled: busy, onClick: function () { togglePeer(peer) } }, peer.disabled ? '启用' : '禁用'),
-              h('button', { className: 'dm-btn bad', disabled: busy, onClick: function () { removePeer(peer) } }, '移出网络')
-            )
-          }) : h('div', { className: 'dm-sub' }, '没有直接配对的设备节点')
+        groups === null ? h('div', { className: 'dm-sub' }, '加载中…') :
+          groups.length ? h('div', { className: 'dm-table-wrap' }, h('table', { className: 'dm-data-table' },
+            h('colgroup', null,
+              h('col', { style: { width: '34px' } }),
+              h('col', { style: { width: '30%' } }),
+              h('col', { style: { width: '96px' } }),
+              h('col', null),
+              h('col', { style: { width: '176px' } })
+            ),
+            h('thead', null, h('tr', null, h('th', null, ''), h('th', null, '设备'), h('th', null, '连接记录'), h('th', null, '地址'), h('th', null, '操作'))),
+            h('tbody', null, groups.map(function (group) {
+              var displayName = group.name + (group.disabled ? '（已禁用）' : '')
+              var urlText = group.urls.join(' · ')
+              return h('tr', { key: group.key },
+                h('td', null, h('span', { className: 'dm-dot ' + (group.disabled ? 'muted' : 'ok'), style: group.disabled ? { opacity: .4 } : undefined })),
+                h('td', { title: displayName }, displayName),
+                h('td', { className: 'dm-mono' }, group.records + ' 条'),
+                h('td', { className: 'dm-mono', title: urlText }, urlText),
+                h('td', null, h('div', { className: 'dm-cell-actions' },
+                  h('button', { className: 'dm-btn', disabled: busy, onClick: function () { toggleDevice(group) } }, group.disabled ? '启用' : '禁用'),
+                  h('button', { className: 'dm-btn bad', disabled: busy, onClick: function () { removeDevice(group) } }, '移出网络')
+                ))
+              )
+            }))
+          )) : h('div', { className: 'dm-sub' }, '没有直接配对的设备节点')
       )
     }
 
@@ -2030,7 +2445,13 @@ function deviceLinkState(data, peer, lanMap) {
         directEndpoints.push({ source: source || '入口', host: h, port: p, up: up === true, kind: kind || '' })
       }
       var lt = (props.data && props.data.localTunnel) || {}
-      if (lt.host && lt.port) addDirect('本机', lt.host, lt.port, Boolean(lt.probe && lt.probe.up) || Boolean(lt.host), lt.kind || '')
+      // 2026-11-12：localTunnel 里公网入口在 selfHosted（host/port），顶层 host/port 可能不存在，
+      // 否则「本机」这一条公网入口会从列表里消失（用户反馈peer-x公网连接没了）。
+      var selfT = lt.selfHosted || {}
+      var selfEntry = (lt.host && lt.port)
+        ? { host: lt.host, port: lt.port, up: Boolean(lt.probe && lt.probe.up) || Boolean(lt.host) }
+        : (selfT.host && selfT.port ? { host: selfT.host, port: selfT.port, up: Boolean(selfT.probe && selfT.probe.up) || Boolean(selfT.host) } : null)
+      if (selfEntry) addDirect('本机', selfEntry.host, selfEntry.port, selfEntry.up, selfT.kind || lt.kind || '')
       ;((props.data && props.data.peers) || []).forEach(function (p) {
         if (isLanPeer(p)) return
         var t = p.tunnel || {}
@@ -2078,11 +2499,19 @@ function deviceLinkState(data, peer, lanMap) {
 
     // 2026-11-11：公网连接（直连手填 / 樱花自动检测）——旧 PublicProbe 保留但不再挂载
     function PublicConnection(props) {
+      // 2026-11-11：支持固定模式 —— 「公网连接」与「内网穿透（樱花穿透）」拆成两个栏目后，
+      // 每个栏目只渲染自己那一半内容，不再用页签切换。
+      var fixedMode = props && (props.mode === 'sakura' || props.mode === 'direct') ? props.mode : ''
+      // 2026-11-11：AI 网络2 里拓扑会自动展示所有已发现通道，不再用“加入/移出拓扑”的手动视图开关
+      var v2 = props && props.variant === 'v2'
+      // 2026-11-12：拆分栏目后不能再共用一份本地缓存 —— 否则「内网穿透（樱花穿透）」里点检测
+      // 保存的樱花地址会被「公网连接」读到并预填（用户明确不要默认值）。按栏目分 key，沙箱不预填。
+      var savedKey = fixedMode ? ('dsh-mesh-ui.publicConnection.v2.' + fixedMode) : 'dsh-mesh-ui.publicConnection.v2'
       var saved = {}
-      try { saved = JSON.parse(window.localStorage.getItem('dsh-mesh-ui.publicConnection.v2') || '{}') || {} } catch (_) { saved = {} }
-      var ms = useState(saved.mode === 'sakura' ? 'sakura' : 'direct'); var mode = ms[0]; var setMode = ms[1]
-      var hs = useState(saved.host || ''); var host = hs[0]; var setHost = hs[1]
-      var ps = useState(saved.port || 8124); var port = ps[0]; var setPort = ps[1]
+      try { saved = JSON.parse(window.localStorage.getItem(savedKey) || '{}') || {} } catch (_) { saved = {} }
+      var ms = useState(fixedMode || (saved.mode === 'sakura' ? 'sakura' : 'direct')); var mode = ms[0]; var setMode = ms[1]
+      var hs = useState(fixedMode ? '' : (saved.host || '')); var host = hs[0]; var setHost = hs[1]
+      var ps = useState(fixedMode ? '' : (saved.port || 8124)); var port = ps[0]; var setPort = ps[1]
       var rs = useState(null); var result = rs[0]; var setResult = rs[1]
       var bs = useState(false); var busy = bs[0]; var setBusy = bs[1]
       var msgs = useState(''); var msg = msgs[0]; var setMsg = msgs[1]
@@ -2200,7 +2629,7 @@ function deviceLinkState(data, peer, lanMap) {
       }
 
       function persist(nextMode, nextHost, nextPort) {
-        try { window.localStorage.setItem('dsh-mesh-ui.publicConnection.v2', JSON.stringify({ mode: nextMode, host: nextHost, port: nextPort })) } catch (_) {}
+        try { window.localStorage.setItem(savedKey, JSON.stringify({ mode: nextMode, host: nextHost, port: nextPort })) } catch (_) {}
       }
       function runProbe(nextHost, nextPort, nextSakura) {
         var h = String(nextHost || '').trim(); var p = Number(nextPort)
@@ -2290,7 +2719,13 @@ function deviceLinkState(data, peer, lanMap) {
         directEndpoints.push({ source: source || '入口', host: h, port: p, up: up === true, kind: kind || '' })
       }
       var lt = (props.data && props.data.localTunnel) || {}
-      if (lt.host && lt.port) addDirect('本机', lt.host, lt.port, Boolean(lt.probe && lt.probe.up) || Boolean(lt.host), lt.kind || '')
+      // 2026-11-12：localTunnel 里公网入口在 selfHosted（host/port），顶层 host/port 可能不存在，
+      // 否则「本机」这一条公网入口会从列表里消失（用户反馈peer-x公网连接没了）。
+      var selfT = lt.selfHosted || {}
+      var selfEntry = (lt.host && lt.port)
+        ? { host: lt.host, port: lt.port, up: Boolean(lt.probe && lt.probe.up) || Boolean(lt.host) }
+        : (selfT.host && selfT.port ? { host: selfT.host, port: selfT.port, up: Boolean(selfT.probe && selfT.probe.up) || Boolean(selfT.host) } : null)
+      if (selfEntry) addDirect('本机', selfEntry.host, selfEntry.port, selfEntry.up, selfT.kind || lt.kind || '')
       ;((props.data && props.data.peers) || []).forEach(function (p) {
         if (isLanPeer(p)) return
         var t = p.tunnel || {}
@@ -2299,7 +2734,7 @@ function deviceLinkState(data, peer, lanMap) {
         addDirect(nodeDisplay(peerDeviceKey(p.name)), t.host, t.port, Boolean(p.up || (t.probe && t.probe.up)), t.kind)
       })
       return h('div', { className: 'dm-public' },
-        h('div', { className: 'dm-pub-tabs' },
+        fixedMode ? null : h('div', { className: 'dm-pub-tabs' },
           h('button', { className: 'dm-pub-tab' + (mode === 'direct' ? ' active' : ''), onClick: function () { switchMode('direct') } }, '公网直连'),
           h('button', { className: 'dm-pub-tab' + (mode === 'sakura' ? ' active' : ''), onClick: function () { switchMode('sakura') } }, '樱花穿透')
         ),
@@ -2315,11 +2750,12 @@ function deviceLinkState(data, peer, lanMap) {
                   h('td', null, h('span', { className: 'dm-chip ' + (it.up ? 'ok' : 'muted') }, it.up ? '在线' : '未探测')),
                   h('td', { className: 'dm-lan-actions' },
                     h('button', { className: 'dm-btn', disabled: busy, onClick: function () { setHost(it.host); setPort(it.port); persist(mode, it.host, it.port); runProbe(it.host, it.port, false) } }, '检测'),
-                    h('button', { className: 'dm-btn' + (isPublicSelected(it) ? ' bad' : ''), disabled: busy, onClick: function () { togglePublicServer(it) } }, isPublicSelected(it) ? '移出拓扑' : '加入拓扑')
+                    v2 ? null : h('button', { className: 'dm-btn' + (isPublicSelected(it) ? ' bad' : ''), disabled: busy, onClick: function () { togglePublicServer(it) } }, isPublicSelected(it) ? '移出拓扑' : '加入拓扑')
                   )
                 )
               }))
             ) : h('div', { className: 'dm-empty' }, '当前没有已配对的公网入口，可在下面手动输入。'),
+            v2 ? h('div', { className: 'dm-sub', style: { marginTop: 6 } }, '拓扑图会自动显示所有已发现的公网通道（设备卡片下方的信息卡可看地址）；这里只做检测，不需要手动加入/移出。') : null,
             h('div', { className: 'dm-sub', style: { marginTop: 8 } }, '手动输入公网地址：'),
             h('div', { className: 'dm-public-form' },
               h('input', { type: 'text', value: host, placeholder: '公网 IP 或域名', spellCheck: false, onChange: function (e) { setHost(e.target.value) } }),
@@ -2334,8 +2770,9 @@ function deviceLinkState(data, peer, lanMap) {
               h('span', { className: 'dm-sakura-server-name' }, sakuraServers[0].name),
               h('span', { className: 'dm-sub dm-mono' }, sakuraServers[0].host || '—'),
               h('span', { className: 'dm-sub' }, sakuraServers[0].meshCount + ' mesh / ' + sakuraServers[0].otherCount + ' 其他'),
-              h('button', { className: 'dm-btn' + (isGroupSelected(sakuraServers[0]) ? ' bad' : ''), disabled: busy, onClick: function () { toggleGroup(sakuraServers[0]) } }, isGroupSelected(sakuraServers[0]) ? '移出拓扑' : '加入拓扑')
+              v2 ? null : h('button', { className: 'dm-btn' + (isGroupSelected(sakuraServers[0]) ? ' bad' : ''), disabled: busy, onClick: function () { toggleGroup(sakuraServers[0]) } }, isGroupSelected(sakuraServers[0]) ? '移出拓扑' : '加入拓扑')
             ) : h('div', { className: 'dm-empty' }, '未读取到 Sakura 服务器。'),
+            v2 ? h('div', { className: 'dm-sub', style: { marginTop: 6 } }, '拓扑图会自动显示所有已发现的樱花通道；这里只做检测/验证，不需要手动加入/移出。') : null,
             sakuraEndpoints.length ? h('table', { className: 'dm-lan-table dm-sakura-table' },
               h('thead', null, h('tr', null, h('th', null, '隧道'), h('th', null, '备注'), h('th', null, '地址'), h('th', null, '本地端口'), h('th', null, '状态'), h('th', null, '操作'))),
               h('tbody', null, sakuraEndpoints.map(function (it, i) {
@@ -2378,7 +2815,7 @@ function deviceLinkState(data, peer, lanMap) {
             sak.matches && sak.matches.length ? sak.matches.map(function (m, i) {
               return h('div', { className: 'dm-public-row', key: i }, h('span', { className: 'dm-public-k' }, '匹配'), h('span', { className: 'dm-public-v good' }, m.name + ' · ' + m.host + ':' + m.port + (m.up ? ' · 在线' : ' · 离线')))
             }) : null
-          , result.compatible ? h('div', { className: 'dm-join' },
+          , (result.compatible && !v2) ? h('div', { className: 'dm-join' },
             h('div', { className: 'dm-sub' }, '检测通过。这是服务器入口，不是新设备；加入拓扑不需要配对码。'),
             h('div', { className: 'dm-public-form' },
               h('button', { className: 'dm-btn primary', disabled: busy, onClick: toggleResultServer },
@@ -2427,16 +2864,23 @@ function deviceLinkState(data, peer, lanMap) {
           h('span', { className: 'dm-sub' }, (tools || []).length + ' 个工具')
         ),
         msg ? h('div', { className: 'dm-sub dm-public-msg' }, msg) : null,
-        tools === null ? h('div', { className: 'dm-sub' }, '加载中…') : h('div', { className: 'dm-perm-list' },
-          filtered.map(function (t) {
-            return h('label', { className: 'dm-perm-row', key: t.name },
-              h('input', { type: 'checkbox', checked: t.allowed, disabled: busy, onChange: function () { toggle(t) } }),
-              h('span', { className: 'dm-perm-name' }, t.name),
-              h('span', { className: 'dm-perm-desc', title: t.description }, t.descriptionZh || t.description),
-              h('span', { className: 'dm-chip ' + (t.allowed ? 'ok' : 'muted') }, t.allowed ? '允许' : '禁止')
+        tools === null ? h('div', { className: 'dm-sub' }, '加载中…') : h('div', { className: 'dm-table-wrap' }, h('table', { className: 'dm-data-table' },
+          h('colgroup', null,
+            h('col', { style: { width: '44px' } }),
+            h('col', { style: { width: '190px' } }),
+            h('col', null),
+            h('col', { style: { width: '64px' } })
+          ),
+          h('thead', null, h('tr', null, h('th', null, '启用'), h('th', null, '工具名'), h('th', null, '说明'), h('th', null, '状态'))),
+          h('tbody', null, filtered.map(function (t) {
+            return h('tr', { key: t.name },
+              h('td', null, h('input', { type: 'checkbox', checked: t.allowed, disabled: busy, onChange: function () { toggle(t) } })),
+              h('td', { className: 'dm-mono', title: t.name }, t.name),
+              h('td', { className: 'dm-sub', title: t.description }, t.descriptionZh || t.description),
+              h('td', null, h('span', { className: 'dm-chip ' + (t.allowed ? 'ok' : 'muted') }, t.allowed ? '允许' : '禁止'))
             )
-          })
-        )
+          }))
+        ))
       )
     }
 
@@ -2515,29 +2959,95 @@ function deviceLinkState(data, peer, lanMap) {
       var s = useState(null); var items = s[0]; var setItems = s[1]
       var b = useState(false); var busy = b[0]; var setBusy = b[1]
       var m = useState(''); var msg = m[0]; var setMsg = m[1]
-      function refresh() {
-        setBusy(true)
-        jsonFetch('/api/dsh-mesh/transfers').then(function (j) {
-          if (j.ok) setItems(j.items || []); else setMsg(j.error || '读取传输历史失败')
+      var sc = useState('local'); var scope = sc[0]; var setScope = sc[1]
+      var nd = useState([]); var nodesInfo = nd[0]; var setNodesInfo = nd[1]
+      var mt = useState(null); var meta = mt[0]; var setMeta = mt[1]
+      function refresh(nextScope) {
+        var target = nextScope || scope
+        setBusy(true); setMsg('')
+        jsonFetch('/api/dsh-mesh/transfers' + (target === 'all' ? '?scope=all' : '')).then(function (j) {
+          if (j.ok) {
+            setItems(j.items || []); setNodesInfo(j.nodes || [])
+            setMeta({ at: j.generatedAt || null, cached: Boolean(j.cached), stale: Boolean(j.stale), cacheAgeMs: Number(j.cacheAgeMs) || 0 })
+          } else setMsg(j.error || '读取传输历史失败')
         }).catch(function (e) { setMsg(String(e.message || e)) }).finally(function () { setBusy(false) })
       }
-      useEffect(function () { refresh() }, [])
+      useEffect(function () { refresh(scope) }, [scope])
       function fmtBytes(n) { n = Number(n) || 0; if (n < 1024) return n + ' B'; if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'; if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB'; return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB' }
+      function deviceLabel(raw) {
+        var v = String(raw || '').trim()
+        if (!v) return ''
+        // 记录里的 node 可能是 peer 名（如 home-lan、peer-node-fvn3）：逐段截断映射回设备名
+        var parts = v.split('-')
+        for (var i = parts.length; i >= 1; i--) {
+          var key = parts.slice(0, i).join('-').toLowerCase()
+          var disp = nodeDisplay(peerDeviceKey(key))
+          if (disp && String(disp).toLowerCase() !== key) return disp
+        }
+        return v
+      }
+      // read = 该记录所在节点把文件发出去（被对端读取）；write = 该节点接收（对端写入）。
+      // 记录里的 peer 字段是 mesh 侧对端标识（可能是带随机后缀的 peer 名），统一显示「对端」并在 title 里保留原始值。
+      function parties(it) {
+        var selfName = it.node && it.node !== '本机' ? deviceLabel(it.node) : '本机'
+        if (it.direction === 'write') return { from: '对端', to: selfName, fromRaw: it.peer || '', toRaw: '' }
+        return { from: selfName, to: '对端', fromRaw: '', toRaw: it.peer || '' }
+      }
+      var shown = items || []
       return h('div', { className: 'dm-transfers' },
         h('div', { className: 'dm-lan-row' },
-          h('button', { className: 'dm-btn', disabled: busy, onClick: refresh }, busy ? '读取中…' : '刷新历史'),
-          h('span', { className: 'dm-sub' }, '记录通过 file_read_chunk / file_write_chunk 完成的传输')
+          h('button', { className: 'dm-btn' + (scope === 'local' ? ' primary' : ''), disabled: busy, onClick: function () { setScope('local') } }, '本机记录'),
+          h('button', { className: 'dm-btn' + (scope === 'all' ? ' primary' : ''), disabled: busy, onClick: function () { setScope('all') } }, '全网记录'),
+          h('button', { className: 'dm-btn', disabled: busy, onClick: function () { refresh() } }, busy ? '读取中…' : '刷新')
         ),
+        h('div', { className: 'dm-sub', style: { marginTop: 4 } }, scope === 'all'
+          ? '汇总各节点的本机记录（按节点存储；12s 内重复切换走缓存，结果自动落盘 ~/.dsh-mesh/transfers-aggregate.json）'
+          : '只统计本机经 file_read_chunk / file_write_chunk 完成的传输；跨机传输记录在对方节点，可切「全网记录」查看'),
+        nodesInfo && nodesInfo.length ? h('div', { className: 'dm-mini', style: { marginTop: 6 } },
+          nodesInfo.map(function (n, i) {
+            var label = n.node === '本机' ? '本机' : deviceLabel(n.node)
+            return h('span', { key: i, className: 'dm-chip ' + (n.ok ? 'muted' : 'bad'), title: n.error || '' }, label + ' · ' + (n.ok ? n.count + ' 条' : '未获取'))
+          })
+        ) : null,
+        meta ? h('div', { className: 'dm-sub', style: { marginTop: 4 } },
+          (meta.cached ? '缓存' + (meta.cacheAgeMs ? '（' + Math.round(meta.cacheAgeMs / 1000) + 's 前）' : '') : '实时读取')
+          + (meta.at ? ' · 数据时间 ' + new Date(meta.at).toLocaleTimeString() : '')
+          + (meta.stale ? ' · 对端不可达，显示上次落盘快照' : '')) : null,
         msg ? h('div', { className: 'dm-sub', style: { marginTop: 6 } }, msg) : null,
         items === null ? h('div', { className: 'dm-sub' }, '加载中…') :
-          items.length ? items.map(function (it, i) {
-            return h('div', { className: 'dm-node-row', key: i },
-              h('span', { className: 'dm-chip ' + (it.direction === 'write' ? 'run' : 'muted') }, it.direction === 'write' ? '写入' : '读取'),
-              h('span', { className: 'dm-node-name' }, String(it.path || '').split(/[\\/]/).pop() || '?'),
-              h('span', { className: 'dm-node-url' }, (it.peer || '本机') + ' · ' + fmtBytes(it.bytes) + (it.totalBytes ? ' / ' + fmtBytes(it.totalBytes) : '')),
-              h('span', { className: 'dm-sub' }, it.at ? new Date(it.at).toLocaleTimeString() : '')
-            )
-          }) : h('div', { className: 'dm-sub' }, '还没有传输记录')
+          shown.length ? h('div', { className: 'dm-table-wrap' }, h('table', { className: 'dm-data-table' },
+            h('colgroup', null,
+              scope === 'all' ? h('col', { style: { width: '96px' } }) : null,
+              h('col', { style: { width: '58px' } }),
+              h('col', { style: { width: '104px' } }),
+              h('col', { style: { width: '104px' } }),
+              h('col', { style: { width: '15%' } }),
+              h('col', null),
+              h('col', { style: { width: '86px' } }),
+              h('col', { style: { width: '92px' } })
+            ),
+            h('thead', null, h('tr', null,
+              scope === 'all' ? h('th', null, '节点') : null,
+              h('th', null, '方向'), h('th', null, '发出方'), h('th', null, '接收方'), h('th', null, '文件'), h('th', null, '路径'), h('th', null, '大小'), h('th', null, '时间')
+            )),
+            h('tbody', null, shown.map(function (it, i) {
+              var fileName = String(it.path || '').split(/[\\/]/).pop() || '?'
+              var p = parties(it)
+              var dirLabel = it.direction === 'write' ? '接收' : '发出'
+              return h('tr', { key: i },
+                scope === 'all' ? h('td', { title: String(it.node || '') }, it.node === '本机' ? '本机' : deviceLabel(it.node)) : null,
+                h('td', null, h('span', { className: 'dm-chip ' + (it.direction === 'write' ? 'run' : 'muted') }, dirLabel)),
+                h('td', { title: p.fromRaw || p.from }, p.from),
+                h('td', { title: p.toRaw || p.to }, p.to),
+                h('td', { title: fileName }, fileName),
+                h('td', { className: 'dm-mono', title: it.path || '' }, it.path || '—'),
+                h('td', null, fmtBytes(it.bytes) + (it.totalBytes && it.totalBytes !== it.bytes ? ' / ' + fmtBytes(it.totalBytes) : '')),
+                h('td', { className: 'dm-mono', title: it.at || '' }, it.at ? new Date(it.at).toLocaleString() : '')
+              )
+            }))
+          )) : h('div', { className: 'dm-sub' }, scope === 'all'
+            ? '全网暂无可显示的传输记录（各节点本机记录为空，或离线未获取）'
+            : '本机还没有传输记录。传输历史按节点记录——从对端拉取文件时，读取记录写在「对方节点」，可切到「全网记录」查看。')
       )
     }
 
@@ -2549,6 +3059,8 @@ function deviceLinkState(data, peer, lanMap) {
       var sCode = useState(''); var code = sCode[0]; var setCode = sCode[1]
       var sMine = useState(null); var mine = sMine[0]; var setMine = sMine[1]
       var sStatus = useState({}); var statuses = sStatus[0]; var setStatuses = sStatus[1]
+      // 2026-11-11：扫描结果里标清楚哪些节点是「本机」（地址 = 本机局域网地址）
+      var sAddr = useState(''); var localAddr = sAddr[0]; var setLocalAddr = sAddr[1]
 
       function lanJson(url, options) {
         return fetch(url, options).then(function (res) {
@@ -2562,6 +3074,7 @@ function deviceLinkState(data, peer, lanMap) {
         lanJson('/api/dsh-mesh/lan/scan').then(function (j) {
           if (!j.ok) { setMsg(j.error || '扫描失败'); return }
           setNodes(j.nodes || [])
+          setLocalAddr(j.localAddress || '')
           setStatuses({})
           setMsg((j.nodes || []).length ? '发现 ' + j.nodes.length + ' 个节点，正在自动检查链路…' : '没有发现局域网节点（对方需 bind 0.0.0.0 并放行 8124）')
           ;(j.nodes || []).forEach(function (node, idx) {
@@ -2608,24 +3121,31 @@ function deviceLinkState(data, peer, lanMap) {
         nodes && nodes.length ? h('table', { className: 'dm-lan-table' },
           h('thead', null, h('tr', null, h('th', null, '状态'), h('th', null, '节点'), h('th', null, '地址'), h('th', null, '操作'))),
           h('tbody', null, nodes.map(function (node, i) {
+            var isLocalNode = Boolean(localAddr) && String(node.address || node.hostname || '') === String(localAddr)
             return h('tr', { key: i },
               h('td', null, h('span', { className: 'dm-dot ' + (statuses[i] === 'ok' ? 'ok' : statuses[i] === 'bad' ? 'bad' : 'muted'), title: statuses[i] === 'ok' ? '链路可达' : statuses[i] === 'bad' ? '链路不可达' : '检查中' })),
-              h('td', { title: String(node.node || '?') }, node.node || '?'),
-              h('td', { className: 'dm-mono', title: String(node.url || '') }, String(node.url || '').replace('/mcp', '')),
+              h('td', { title: String(node.node || '?') },
+                h('span', null, node.node || '?'),
+                isLocalNode ? h('span', { className: 'dm-chip ok', style: { marginLeft: 6 } }, '本机') : null
+              ),
+              h('td', { className: 'dm-mono', title: String(node.url || '') }, lanScanAddr(node)),
               h('td', { className: 'dm-lan-actions' },
                 h('button', { className: 'dm-btn', disabled: busy, onClick: function () { checkNode(node) } }, '检查链路'),
-                h('button', { className: 'dm-btn primary', disabled: busy || !String(code || '').trim(), onClick: function () { pairWith(node) } }, '用此节点配对')
+                h('button', { className: 'dm-btn primary', disabled: busy || !String(code || '').trim() || isLocalNode, title: isLocalNode ? '这是本机节点，不需要配对' : '', onClick: function () { pairWith(node) } }, isLocalNode ? '本机无需配对' : '用此节点配对')
               )
             )
           }))
         ) : null,
         nodes && nodes.length ? h('div', { className: 'dm-lan-row' },
-          h('input', { placeholder: '对方显示的配对码，如 H5K4-9RXV', value: code, onChange: function (e) { setCode(e.target.value) } })
+          h('input', { placeholder: '输入对方显示的配对码', value: code, style: { flex: '1 1 320px', minWidth: '260px', maxWidth: '520px' }, onChange: function (e) { setCode(e.target.value) } })
         ) : null
       )
     }
 
-    function MeshStatusSection() {
+    function MeshStatusSection(props) {
+      // 2026-11-11：页面变体。'legacy' = 默认「AI 网络」（保持原样）；'v2' = 独立沙箱「AI 网络2」。
+      var variant = (props && props.variant) || 'legacy'
+      void variant
       var s0 = useState(null); var data = s0[0]; var setData = s0[1]
       var s1 = useState(true); var loading = s1[0]; var setLoading = s1[1]
       var sFed = useState(null); var federated = sFed[0]; var setFederated = sFed[1]
@@ -2638,7 +3158,17 @@ function deviceLinkState(data, peer, lanMap) {
       var forceRef = useRef({ at: 0, busy: false })
       var s5 = useState('local'); var selectedKey = s5[0]; var setSelectedKey = s5[1]
       var topoState = useState(0); var topoNonce = topoState[0]; var setTopoNonce = topoState[1]
-      var lanState = useState([]); var lanNodes = lanState[0]; var setLanNodes = lanState[1]
+      // 2026-11-11：局域网扫描结果做本地缓存，并在页面挂载时立刻扫描（不等 status 快照），
+      // 避免「局域网那条线慢半拍」——首屏直接用上次缓存画 LAN 通道，后台扫描刷新。
+      var LAN_CACHE_KEY = 'dsh-mesh-ui.lanScan.v1'
+      var lanState = useState(function () {
+        try {
+          var saved = JSON.parse(window.localStorage.getItem(LAN_CACHE_KEY) || 'null')
+          return saved && Array.isArray(saved.nodes) ? saved.nodes : []
+        } catch (e) { return [] }
+      })
+      var lanNodes = lanState[0]
+      var setLanNodes = lanState[1]
       var lanAtRef = useRef(0)
       function topologyChanged() {
         setTopoNonce(function (n) { return n + 1 })
@@ -2653,12 +3183,23 @@ function deviceLinkState(data, peer, lanMap) {
           setTopoNonce(function (n) { return n + 1 })
         }).catch(function () { /* best effort */ })
       }, [data && data.at])
-      useEffect(function () {
-        if (!data || !data.at || Date.now() - lanAtRef.current < 15000) return
-        lanAtRef.current = Date.now()
+      function scanLanNodes() {
+        var now = Date.now()
+        if (now - lanAtRef.current < 15000) return
+        lanAtRef.current = now
         jsonFetch('/api/dsh-mesh/lan/scan').then(function (r) {
-          if (r && r.ok) { setLanNodes(r.nodes || []); setTopoNonce(function (n) { return n + 1 }) }
+          if (r && r.ok) {
+            setLanNodes(r.nodes || [])
+            setTopoNonce(function (n) { return n + 1 })
+            try { window.localStorage.setItem(LAN_CACHE_KEY, JSON.stringify({ at: Date.now(), nodes: r.nodes || [] })) } catch (e) { /* ignore */ }
+          }
         }).catch(function () { /* best effort */ })
+      }
+      // 挂载即扫描：不依赖 status 快照，配合本地缓存让 LAN 线第一帧就在
+      useEffect(function () { scanLanNodes() }, [])
+      useEffect(function () {
+        if (!data || !data.at) return
+        scanLanNodes()
       }, [data && data.at])
       var panelState = useState(function () {
         try { return JSON.parse(window.localStorage.getItem('dsh-mesh-ui.panels.v1') || '{}') || {} } catch (error) { return {} }
@@ -2670,6 +3211,12 @@ function deviceLinkState(data, peer, lanMap) {
         { id: 'instances', label: '本机实例' }, { id: 'versions', label: '版本一致性' }, { id: 'delegations', label: '委托台账' },
         { id: 'alerts', label: '告警历史' }, { id: 'diagnostics', label: '诊断建议' }
       ]
+      // 2026-11-11（沙箱 AI 网络2）：把「公网连接」和「内网穿透（樱花穿透）」拆成两个栏目
+      if (variant === 'v2') {
+        PANEL_ITEMS = PANEL_ITEMS.slice(0, 3)
+          .concat([{ id: 'sakuraTunnel', label: '内网穿透（樱花穿透）' }])
+          .concat(PANEL_ITEMS.slice(3))
+      }
       function togglePanel(id) {
         setHiddenPanels(function (prev) {
           var next = Object.assign({}, prev);
@@ -2739,7 +3286,8 @@ function deviceLinkState(data, peer, lanMap) {
         st.busy = true
         st.at = now
         setLoading(true)
-        setRefreshHint("采集中…")
+        // 2026-11-12：采集中只由按钮文案提示，别再往 refreshHint 也写「采集中…」，否则会同时出现两个采集中
+        setRefreshHint("")
         var prevAt = data && data.at
         var attempts = 0
         function poll() {
@@ -2823,18 +3371,19 @@ function deviceLinkState(data, peer, lanMap) {
 
         h('div', { className: 'dm-body', style: splitW > 0 ? { '--dm-main-w': splitW + 'px' } : undefined },
           h('div', { className: 'dm-pane' },
-            h(Viewport, { data: data, federated: federated, topoNonce: topoNonce, lanNodes: lanNodes, layout: computeLayout(1 + filterSelfPeers(dedupePeers(data.peers || []), data.nodeName).length + visibleSakuraCandidates().length), selectedKey: selectedKey, onSelect: setSelectedKey }),
+            h(Viewport, { data: data, federated: federated, topoNonce: topoNonce, lanNodes: lanNodes, variant: variant, layout: computeLayout(1 + filterSelfPeers(dedupePeers(data.peers || []), data.nodeName).length + (variant === 'v2' ? 0 : visibleSakuraCandidates().length)), selectedKey: selectedKey, onSelect: setSelectedKey }),
             h(DeviceDetails, { data: data, selectedKey: selectedKey })
           ),
           h('div', { className: 'dm-divider', onPointerDown: startSplit, title: '↔ 拖拽调整左右宽度（双击恢复默认）', onDoubleClick: function () { setSplitW(0); try { window.localStorage.removeItem('dsh-mesh-split-w') } catch (error) { /* ignore */ } } }),
           h('div', { className: 'dm-pane' },
             h(Details, { title: '面板管理', badge: '显示 / 隐藏' }, h(PanelManager, { items: PANEL_ITEMS, hidden: hiddenPanels, onToggle: togglePanel })),
             !hiddenPanels.usage ? h(Details, { title: '使用说明' }, h(UsageHelpV2)) : null,
-            !hiddenPanels.lan ? h(Details, { title: '局域网连接', badge: '扫描 / 配对' }, h(LanOnboarding, { onChanged: topologyChanged })) : null,
-            !hiddenPanels.public ? h(Details, { title: '公网连接', badge: '直连 / 樱花' }, h(PublicConnection, { data: data, onChanged: topologyChanged })) : null,
+            !hiddenPanels.lan ? h(Details, { title: '局域网连接', badge: '扫描 / 配对' }, h(LanOnboarding, { variant: variant, onChanged: topologyChanged })) : null,
+            !hiddenPanels.public ? h(Details, { title: '公网连接', badge: variant === 'v2' ? '直连' : '直连 / 樱花' }, h(PublicConnection, { data: data, mode: variant === 'v2' ? 'direct' : '', variant: variant, onChanged: topologyChanged })) : null,
+            variant === 'v2' && !hiddenPanels.sakuraTunnel ? h(Details, { title: '内网穿透（樱花穿透）', badge: '樱花' }, h(PublicConnection, { data: data, mode: 'sakura', variant: variant, onChanged: topologyChanged })) : null,
             !hiddenPanels.nodes ? h(Details, { title: '节点管理', badge: '仅本机生效' }, h(NodeManager, { onChanged: topologyChanged })) : null,
             !hiddenPanels.permissions ? h(Details, { title: '权限设置', badge: '本机 ACL' }, h(PermissionsPanel)) : null,
-            !hiddenPanels.transfers ? h(Details, { title: '文件传输', badge: '历史' }, h(TransferHistory)) : null,
+            !hiddenPanels.transfers ? h(Details, { title: '文件传输', badge: '本机记录' }, h(TransferHistory)) : null,
             !hiddenPanels.instances ? h(Details, { title: '本机实例', badge: ((data.local && data.local.instances) || []).length }, h(InstanceList, { data: data })) : null,
             !hiddenPanels.versions ? h(Details, { title: '版本一致性', badge: versions.length ? versions.length + ' 处升级' : '一致' },
               versions.length
@@ -3671,7 +4220,8 @@ body[data-ds-dark-theme] .dm-dg-fs-item.active { background:rgba(88,166,255,.28)
   .dm-pane { overflow:visible; padding-right:0; }
 }
 `
-    function MeshNetworkPage() {
+    function MeshNetworkPage(props) {
+      var variant = (props && props.variant) || 'legacy'
       // 宽度偏好：与 DSH 对话区相同语义——空 = 默认宽度，数字 = 用户拖拽固定值。
       var prefState = useState(function () {
         try { var saved = Number(window.localStorage.getItem('dsh-mesh.contentWidth')); return Number.isFinite(saved) && saved > 0 ? saved : 0 } catch (error) { return 0 }
@@ -3819,11 +4369,15 @@ body[data-ds-dark-theme] .dm-dg-fs-item.active { background:rgba(88,166,255,.28)
           h('div', { className: 'dm-width-handle', 'data-side': 'left', title: '拖拽调整内容宽度（双击恢复默认）', onPointerDown: function (event) { beginWidthDrag('left', event) }, onDoubleClick: resetContentWidth }),
           h('div', { className: 'dm-width-handle', 'data-side': 'right', title: '拖拽调整内容宽度（双击恢复默认）', onPointerDown: function (event) { beginWidthDrag('right', event) }, onDoubleClick: resetContentWidth }),
           h('div', { className: 'dm-content-scroll' },
-            h('div', { className: 'dm-content', style: { width: 'min(100%, ' + contentW + 'px)' } }, h(MeshStatusSection))
+            h('div', { className: 'dm-content', style: { width: 'min(100%, ' + contentW + 'px)' } }, h(MeshStatusSection, { variant: variant }))
           )
         )
       )
     }
+
+    // 2026-11-12：用户确认「AI 网络2」方案更好 —— 原沙箱页「AI 网络2」晋升为唯一的「AI 网络」页面；
+    // 旧版独立入口下线（legacy 分支代码保留在 MeshNetworkPage 里，必要时可回滚）。
+    function MeshNetworkPageV2() { return h(MeshNetworkPage, { variant: 'v2' }) }
 
     var SECTION = { name: 'settings.section', id: 'dsh-mesh', order: 90, label: 'AI 网络' }
     var inject = ['slots']
@@ -3891,12 +4445,13 @@ body[data-ds-dark-theme] .dm-dg-fs-item.active { background:rgba(88,166,255,.28)
     function apply(ctx) {
       var disposers = []
       // 2026-11-10：AI 网络从「设置」迁到左侧栏独立页面，使用更大的主区域。
+      // 2026-11-12：用户确认 v2（原 AI 网络2）更好 —— 唯一入口「AI 网络」现在渲染 v2 页面。
       try {
         disposers.push(ctx.slots.inject('sidebar.panellist', function () {
           return ctx.slots.register({ name: 'sidebar.panellist', id: 'mesh-network', order: 54, label: function () { return 'AI 网络' } }, networkPanelIcon)
         }))
         disposers.push(ctx.slots.inject('main', function () {
-          return ctx.slots.register({ name: 'main', key: 'mesh-network', inject: function () { return {} } }, MeshNetworkPage)
+          return ctx.slots.register({ name: 'main', key: 'mesh-network', inject: function () { return {} } }, MeshNetworkPageV2)
         }))
       } catch (error) {
         console.warn('[dsh-mesh-ui] sidebar network page registration failed:', error)

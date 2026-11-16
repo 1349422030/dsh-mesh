@@ -440,6 +440,36 @@ export function buildFiles(ctx) {
       handler: async () => ok({ limits: limitsOf(ctx), usedToday: usedToday(ctx.home), day: dayKey(), usageFile: usagePath(ctx.home) })
     },
     {
+      name: 'file_transfers',
+      title: 'Recent file-transfer records (read-only)',
+      description:
+        'Return this node\'s recent file-transfer records (direction read/write, file path, bytes, time, peer). Read-only; the AI network transfer panel aggregates it across peers with ?scope=all.',
+      inputSchema: z.object({ limit: z.number().int().min(1).max(200).optional().describe('Max records (default 50)') }),
+      handler: async ({ limit = 50 }) => {
+        let items = []
+        try {
+          const raw = JSON.parse(readFileSync(transfersPath(ctx.home), 'utf8'))
+          if (Array.isArray(raw)) items = raw
+        } catch {
+          items = []
+        }
+        items = items
+          .slice()
+          .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
+          .slice(0, limit)
+          .map((x) => ({
+            at: x.at || null,
+            direction: x.direction || '',
+            path: x.path || '',
+            offset: Number(x.offset) || 0,
+            bytes: Number(x.bytes) || 0,
+            totalBytes: Number(x.totalBytes) || 0,
+            peer: x.peer || ''
+          }))
+        return ok({ count: items.length, items, source: transfersPath(ctx.home) })
+      }
+    },
+    {
       name: 'find_files',
       title: 'Fast file search (Everything / fd)',
       description:

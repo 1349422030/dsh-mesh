@@ -4,6 +4,7 @@
 //       解 zstd 会话日志 → 跨机一条命令看正文。
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
@@ -11,10 +12,39 @@ import { fail, ok } from '../core/result.js'
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'session-history.mjs')
 
-function homeOf(instance) {
+/**
+ * Resolve the DSH home directory for an instance name.
+ *
+ * Historically this only knew the multi-instance layout (`~/.dsh0`, `~/.dsh1`, …).
+ * That breaks on single-home deployments: the Windows desktop app uses `~/.dsh`
+ * (no numeric suffix) and app-center installs use an arbitrary root passed via
+ * `DSH_HOME` (e.g. `/vol1/@apphome/fn-deepseek-harness`). This function now tries
+ * `DSH_HOME` → `~/.dsh` → `~/.dshN`, and only accepts a candidate when its
+ * `sessions/` directory actually exists; otherwise it falls back to the old
+ * `~/.dshN` path so error messages stay predictable.
+ *
+ * @param {string} [instance] Instance id, e.g. `dsh0` / `dsh1`.
+ * @returns {string} Absolute DSH home directory.
+ */
+export function homeOf(instance) {
   const id = String(instance || 'dsh0').trim()
   const match = /^dsh(\d+)$/.exec(id)
-  return join(homedir(), `.dsh${match ? Number(match[1]) : 0}`)
+  const index = match ? Number(match[1]) : 0
+  const candidates = []
+  if (index === 0) {
+    const dshHome = String(process.env.DSH_HOME || '').trim()
+    if (dshHome) candidates.push(dshHome)
+    candidates.push(join(homedir(), '.dsh'))
+  }
+  candidates.push(join(homedir(), `.dsh${index}`))
+  const found = candidates.find((dir) => {
+    try {
+      return existsSync(join(dir, 'sessions'))
+    } catch {
+      return false
+    }
+  })
+  return found || candidates[candidates.length - 1]
 }
 
 export function buildSessionHistory() {
@@ -37,7 +67,11 @@ export function buildSessionHistory() {
         const run = spawnSync(process.execPath, [SCRIPT, '--home', home, '--session', id, '--limit', String(lines)], {
           encoding: 'utf8',
           windowsHide: true,
-          timeout: 60000
+          timeout: 60000,
+          // The desktop app runs the host inside Electron; process.execPath is the
+          // Electron binary, so spawning it without this flag opens a GUI instead of
+          // running the script (issue #3).  collect.js run() already does this.
+          env: { ...process.env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }
         })
         const stdout = (run.stdout || '').trim()
         if (!stdout) {

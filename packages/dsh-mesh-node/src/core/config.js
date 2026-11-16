@@ -62,6 +62,7 @@ export const DEFAULT_ALLOW = [
   'file_read_chunk',
   'file_hash',
   'transfer_usage',
+  'file_transfers',
   'find_files',
   'search_text',
   'tool_inventory',
@@ -92,6 +93,7 @@ export const FILE_TRANSFER_TOOLS = [
   'file_write_chunk',
   'file_hash',
   'transfer_usage',
+  'file_transfers',
   'find_files',
   'search_text',
   'tool_inventory'

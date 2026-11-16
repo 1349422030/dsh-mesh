@@ -10,7 +10,7 @@
 //   node scripts/mesh-health.mjs --no-peers # 只看本机
 // 退出码：0 = verdict ok/degraded（有 down 也算 degraded，详情看输出）；3 = down（有实例或 peer 不可用）
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { loadConfig, meshHome, MESH_VERSION } from '../src/core/config.js'
 import { loadPeers } from '../src/core/pairing.js'
@@ -87,6 +87,54 @@ const quiet = { info() {}, warn() {}, error() {} }
 const timeoutMs = Math.max(1000, Number(arg('--timeout-ms', '4000')) || 4000)
 const home = meshHome()
 const startedAt = Date.now()
+
+// 2026-11-12：dsh-mesh-ui 插件在**每个 DSH 实例**后台每 5s 调一次 `mesh-health --json`，
+// 三实例叠加成每 ~1.7s 一轮 5-peer 探测，把共享 frps 隧道的 frpc 工作连接池打满
+// （work connection pool is full → 正常连接被丢 → 节点表现为反复掉线）。
+// 对「无参数 --json」快照加文件缓存 + 单飞锁：多实例共享一次结果（MESH_HEALTH_CACHE_MS=0 关闭）。
+const healthCacheMs = Math.max(0, Number(process.env.MESH_HEALTH_CACHE_MS ?? 6_000) || 0)
+const plainJson = argv.length === 1 && argv[0] === '--json'
+const healthCacheFile = join(home, 'health-cache.json')
+const healthLockFile = join(home, 'health-cache.lock')
+const readHealthCache = () => {
+  try {
+    const cached = JSON.parse(readFileSync(healthCacheFile, 'utf8'))
+    if (cached?.at && cached.argv === 'json' && Date.now() - cached.at < healthCacheMs) return cached
+  } catch {
+    /* miss */
+  }
+  return null
+}
+if (plainJson && healthCacheMs > 0) {
+  const hit = readHealthCache()
+  if (hit) {
+    console.log(JSON.stringify(hit.snapshot, null, 2))
+    process.exit(hit.verdict === 'down' ? 3 : 0)
+  }
+  let lockedAt = 0
+  try {
+    lockedAt = Number(readFileSync(healthLockFile, 'utf8')) || 0
+  } catch {
+    /* no lock */
+  }
+  // 另一个实例正在算：等它写缓存（最多 12s，覆盖一次完整探测），避免多实例同时探测同一批 peer
+  if (lockedAt && Date.now() - lockedAt < 20_000) {
+    const deadline = Date.now() + 12_000
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const again = readHealthCache()
+      if (again) {
+        console.log(JSON.stringify(again.snapshot, null, 2))
+        process.exit(again.verdict === 'down' ? 3 : 0)
+      }
+    }
+  }
+  try {
+    writeFileSync(healthLockFile, String(Date.now()))
+  } catch {
+    /* ignore */
+  }
+}
 
 function tailText(s, n = 200) {
   const t = String(s || '').replace(/\s+/g, ' ').trim()
@@ -339,6 +387,19 @@ if (has('--alert')) {
         console.log(`[alert] 首次探测异常（${retryVerdict}），已计数 ${run}/2（迟滞：连续 2 次才告警）`)
       }
     }
+  }
+}
+
+if (plainJson && healthCacheMs > 0) {
+  try {
+    writeFileSync(healthCacheFile, JSON.stringify({ at: Date.now(), argv: 'json', verdict, snapshot }))
+  } catch {
+    /* ignore */
+  }
+  try {
+    rmSync(healthLockFile, { force: true })
+  } catch {
+    /* ignore */
   }
 }
 

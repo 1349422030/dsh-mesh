@@ -10,6 +10,12 @@ import { fail, ok } from '../core/result.js'
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled'])
 
+// mesh_overview 结果缓存：面板按秒轮询时直接命中，避免每次重复探测 5 个 peer
+// （详见 buildOverview 注释；MESH_OVERVIEW_TTL_MS=0 可关闭）。
+const OVERVIEW_TTL_MS = Math.max(0, Number(process.env.MESH_OVERVIEW_TTL_MS ?? 10_000) || 0)
+const overviewCache = new Map()
+const overviewInflight = new Map()
+
 /**
  * 本机仓库摘要。走共享的 git 解析（DSH_MESH_GIT → PATH → 常见安装目录），
  * 否则计划任务式干净 PATH 下这里会把「找不到 git」报成空摘要。
@@ -74,6 +80,85 @@ function taskStats(root) {
     if (age > 3600 || (statusAge !== null && statusAge > 3600) || (idTime && Date.now() - idTime > 3600_000)) stale += 1
   }
   return { active, stale, activeStale: stale }
+}
+
+/**
+ * 组装一次 mesh_overview 快照（纯只读）。
+ * 2026-11-12：原实现对每个 peer 串行发 3 个跨机请求（5 peer 最坏 60s+）；面板按秒轮询时
+ * 请求互相重叠，把共享 frps 隧道的各节点 frpc 工作连接池打满（work connection pool is full），
+ * 正常连接被丢弃 → 表现为节点「总是掉线」。这里改为：本地/peer 任务/peer 仓库/git 全部并行，
+ * 并配合 handler 的 TTL 缓存 + in-flight 去重（见 OVERVIEW_TTL_MS）。
+ */
+async function buildOverview({ config, home, log, peers, timeoutMs }) {
+  const mapped = peers.map((peer) => ({
+    id: peer.id,
+    name: peer.name,
+    url: peer.url,
+    certFingerprint: peer.certFingerprint,
+    token: peer.token
+  }))
+  const localRoot = config.acl?.fsRoots?.[0]?.path || ''
+  const perPeerTimeout = Math.min(timeoutMs, 8000)
+  const [report, localTasks, peerTasks, peerRepos, localRepo] = await Promise.all([
+    clusterReport({ config, home, log, peers: mapped, timeoutMs }),
+    Promise.resolve(localRoot ? taskStats(localRoot) : { active: 0, stale: 0, activeStale: 0 }),
+    Promise.all(
+      peers.map(async (peer) => {
+        try {
+          const out = await callPeerTool(peer, { tool: 'delegate_list', args: { limit: 100 }, timeoutMs: perPeerTimeout })
+          const text = out.result?.content?.[0]?.text || '{}'
+          const listed = JSON.parse(text)
+          return { peer: peer.name, activeCount: listed.activeCount || 0, staleActiveCount: listed.staleActiveCount || 0 }
+        } catch (error) {
+          return { peer: peer.name, error: String(error?.message || error) }
+        }
+      })
+    ),
+    Promise.all(
+      peers.map(async (peer) => {
+        try {
+          const selfOut = await callPeerTool(peer, { tool: 'mesh_self', args: {}, timeoutMs: perPeerTimeout })
+          const selfText = selfOut.result?.content?.[0]?.text || '{}'
+          const self = JSON.parse(selfText)
+          // 对端仓库路径由**对端**决定：用平台无关拼接（Linux 节点拼 Windows 对端路径不能走本机 path.join）
+          const repoPath = self.mesh?.repo || joinRemote(self.acl?.fsRoots?.[0]?.path || '', 'dsh-mesh')
+          const statusOut = await callPeerTool(peer, { tool: 'git_status', args: { path: repoPath }, timeoutMs: perPeerTimeout })
+          const statusText = statusOut.result?.content?.[0]?.text || '{}'
+          const status = JSON.parse(statusText)
+          return {
+            peer: peer.name,
+            path: repoPath,
+            head: status.head ? String(status.head).slice(0, 7) : '',
+            branch: status.branch || '',
+            dirty: (status.dirty?.modified || 0) + (status.dirty?.untracked || 0),
+            ahead: status.ahead ?? null,
+            behind: status.behind ?? null
+          }
+        } catch (error) {
+          return { peer: peer.name, error: String(error?.message || error) }
+        }
+      })
+    ),
+    gitInfo(process.cwd())
+  ])
+  return {
+    node: report.node,
+    summary: report.summary,
+    verdict: report.verdict,
+    issues: report.issues,
+    repos: { local: localRepo, peers: peerRepos },
+    instances: (report.instances || []).map((instance) => ({
+      id: instance.id,
+      label: instance.label,
+      up: instance.up,
+      plugin: instance.plugin,
+      pid: instance.pid,
+      toolCount: instance.toolCount,
+      liveAgents: (instance.agents || []).length
+    })),
+    peers: report.peers,
+    tasks: { local: localTasks, peers: peerTasks }
+  }
 }
 /**
  * Cluster view (M7 step 4). One read-only call answers "is the whole cluster
@@ -141,75 +226,27 @@ export function buildCluster(ctx) {
         try {
           const config = ctx.getConfig()
           const peers = includePeers === false ? [] : loadPeers(ctx.home).items || []
-          const report = await clusterReport({
-            config,
-            home: ctx.home,
-            log: ctx.log,
-            peers: peers.map((peer) => ({
-              id: peer.id,
-              name: peer.name,
-              url: peer.url,
-              certFingerprint: peer.certFingerprint,
-              token: peer.token
-            })),
-            timeoutMs
-          })
-          const localRoot = config.acl?.fsRoots?.[0]?.path || ''
-          const localTasks = localRoot ? taskStats(localRoot) : { active: 0, stale: 0, activeStale: 0 }
-          const peerTasks = []
-          for (const peer of peers) {
-            try {
-              const out = await callPeerTool(peer, { tool: 'delegate_list', args: { limit: 100 }, timeoutMs: Math.min(timeoutMs, 8000) })
-              const text = out.result?.content?.[0]?.text || '{}'
-              const listed = JSON.parse(text)
-              peerTasks.push({ peer: peer.name, activeCount: listed.activeCount || 0, staleActiveCount: listed.staleActiveCount || 0 })
-            } catch (error) {
-              peerTasks.push({ peer: peer.name, error: String(error?.message || error) })
-            }
+          // 缓存键只按「是否含远端 peer」区分：timeoutMs 只影响单次探测超时，
+          // 不同调用方传不同 timeoutMs 不应各自触发一次全量探测（否则轮询永远 miss）。
+          const key = includePeers === false ? 'local' : 'all'
+          const now = Date.now()
+          const cached = overviewCache.get(key)
+          if (cached && now - cached.at < OVERVIEW_TTL_MS) {
+            return ok(cached.payload)
           }
-          const peerRepos = []
-          for (const peer of peers) {
-            try {
-              const selfOut = await callPeerTool(peer, { tool: 'mesh_self', args: {}, timeoutMs: Math.min(timeoutMs, 8000) })
-              const selfText = selfOut.result?.content?.[0]?.text || '{}'
-              const self = JSON.parse(selfText)
-              // 对端仓库路径由**对端**决定：用平台无关拼接（Linux 节点拼 Windows 对端路径不能走本机 path.join）
-              const repoPath = self.mesh?.repo || joinRemote(self.acl?.fsRoots?.[0]?.path || '', 'dsh-mesh')
-              const statusOut = await callPeerTool(peer, { tool: 'git_status', args: { path: repoPath }, timeoutMs: Math.min(timeoutMs, 8000) })
-              const statusText = statusOut.result?.content?.[0]?.text || '{}'
-              const status = JSON.parse(statusText)
-              peerRepos.push({
-                peer: peer.name,
-                path: repoPath,
-                head: status.head ? String(status.head).slice(0, 7) : '',
-                branch: status.branch || '',
-                dirty: (status.dirty?.modified || 0) + (status.dirty?.untracked || 0),
-                ahead: status.ahead ?? null,
-                behind: status.behind ?? null
-              })
-            } catch (error) {
-              peerRepos.push({ peer: peer.name, error: String(error?.message || error) })
-            }
+          // 同一 key 的并发调用共享一次执行（面板轮询重叠时不重复探测 peer）
+          const pending = overviewInflight.get(key)
+          if (pending) {
+            return ok(await pending)
           }
-          const localRepo = await gitInfo(process.cwd())
-          return ok({
-            node: report.node,
-            summary: report.summary,
-            verdict: report.verdict,
-            issues: report.issues,
-            repos: { local: localRepo, peers: peerRepos },
-            instances: (report.instances || []).map((instance) => ({
-              id: instance.id,
-              label: instance.label,
-              up: instance.up,
-              plugin: instance.plugin,
-              pid: instance.pid,
-              toolCount: instance.toolCount,
-              liveAgents: (instance.agents || []).length
-            })),
-            peers: report.peers,
-            tasks: { local: localTasks, peers: peerTasks }
-          })
+          const promise = buildOverview({ config, home: ctx.home, log: ctx.log, peers, timeoutMs })
+            .then((payload) => {
+              overviewCache.set(key, { at: Date.now(), payload })
+              return payload
+            })
+            .finally(() => overviewInflight.delete(key))
+          overviewInflight.set(key, promise)
+          return ok(await promise)
         } catch (error) {
           return fail('E_OVERVIEW_ERROR', error?.message || String(error))
         }
