@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/client'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
-import { loadSecrets, defaultConfig, configPath, loadConfig, DEFAULT_ALLOW, aclDrift, peerAclForToken } from './core/config.js'
+import { loadSecrets, defaultConfig, configPath, loadConfig, DEFAULT_ALLOW, aclDrift, peerAclForToken, CONFIG_VERSION } from './core/config.js'
 import { describeAcl, resolveAclUpdate } from './core/acl.js'
 import { roleAllow, inferRole } from './core/roles.js'
 import { applyPatchInsert, assertInside, normalizePluginFiles, patchHasPlugin, pluginRoot } from './core/repair.js'
@@ -739,7 +739,7 @@ export async function runSelftest({ log = console } = {}) {
         'utf8'
       )
       const cfg = loadConfig(tmpPeerB, { log: quiet })
-      assert(cfg.version === 7, `expected version 7 after full migration, got ${cfg.version}`)
+      assert(cfg.version === CONFIG_VERSION, `expected version ${CONFIG_VERSION} after full migration, got ${cfg.version}`)
       assert(Array.isArray(cfg.hosts) && cfg.hosts.length === 2, 'expected two host entries')
       assert(
         cfg.hosts[0].id === 'dsh0' && cfg.hosts[0].url === 'http://127.0.0.1:9111',
@@ -792,7 +792,7 @@ export async function runSelftest({ log = console } = {}) {
         'utf8'
       )
       const cfg = loadConfig(tmpPeerB, { log: quiet })
-      assert(cfg.version === 7, `expected version 7, got ${cfg.version}`)
+      assert(cfg.version === CONFIG_VERSION, `expected version ${CONFIG_VERSION}, got ${cfg.version}`)
       assert(cfg.repair && cfg.repair.enabled === false, 'repair must default to disabled')
       assert(Array.isArray(cfg.repair.restartScripts) === false && typeof cfg.repair.restartScripts === 'object', 'restartScripts map')
       assert(cfg.hosts[0].url === 'http://127.0.0.1:9112', 'custom bridge should survive')
