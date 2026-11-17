@@ -1,8 +1,7 @@
 # Changelog
 
-## 0.3.47 — 2026-11-17
+## Unreleased — 2026-11-17
 
-- 版本：`dsh-mesh-node@0.0.23`、`dsh-mesh-ui@0.0.88`、`@linyanzhi/dsh-mesh@0.3.47`（npm 发布）
 - `dsh-mesh-node`: fix `session_history` on non-`~/.dshN` layouts — `homeOf()` now tries `DSH_HOME` → `~/.dsh` → `~/.dshN` and accepts the first candidate whose `sessions/` exists (issues #4, PR #6).
 - `dsh-mesh-node`: fix `session_history` on the Electron desktop app — the script spawn now sets `ELECTRON_RUN_AS_NODE=1` so it does not launch a GUI until timeout (issue #3).
 - `dsh-mesh-node`: ship the missing `scripts/session-history.mjs` in the published package (issue #1, PR #7). The source repo already had it; `build-public.mjs` did not copy it.
