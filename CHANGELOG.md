@@ -2,6 +2,7 @@
 
 ## Unreleased — 2026-11-17
 
+- UI: 修复「AI 网络」整块白屏 —— `8845220` 把硬编码设备表换成 `formFactorOf(h)` 时删掉了 `deviceType()` 的定义，却漏改 12 处调用点（`nodeDisplay()` 内一处、拓扑节点卡片一处），每次渲染抛 `ReferenceError` 被宿主的 slot 错误边界吞成空白。现补齐模块级 `deviceType()` / `DEVICE_HW` 缓存，并在 `Topology`、`DeviceDetails` 登记各节点 hardware。
 - UI: 新增新人上手三步引导（本机就绪 → 发现第二台 → 开始派活），只有本机时给出下一步提示。
 - UI: 新增只读「演示模式」（示例设备/派发/结果/文件传输），不发起任何网络请求；用于单机第一次打开时看完整闭环。
 
