@@ -242,15 +242,19 @@ dsh-mesh cluster status         # 本机 + 已配对节点的实例/延迟
 
 ## 让 AI 自己安装
 
-把这段发给你的 DSH AI：
+把这段发给你的 DSH AI（也就是「模板 1」，更多模板见 [docs/AI-PROMPTS.md](docs/AI-PROMPTS.md)）：
 
 ```
-请帮我安装 dsh-mesh 插件，按 https://github.com/LinYanZhi/dsh-mesh/blob/main/docs/INSTALL-FOR-AGENTS.md 执行：
-1) 确认 Node >= 22、DSH >= 0.2.0-rc.2，找到我当前使用的 DSH profile
-2) 安装并验证 @linyanzhi/dsh-mesh（或 dsh-mesh-host / dsh-mesh-ui / dsh-mesh-autostart）
-3) 需要重启 DSH 时先问我
-4) 不要开启远程桌面控制（pcControl）
-5) 每一步报告验证结果，失败就停下来
+请帮我安装 dsh-mesh，按下面的文档与检查单执行：
+- https://github.com/LinYanZhi/dsh-mesh/blob/main/docs/AI-CHECKLIST.md
+- https://github.com/LinYanZhi/dsh-mesh/blob/main/docs/INSTALL-FOR-AGENTS.md
+
+0) 先做只读检查：node tools/ai-install.mjs --json（本机没有仓库就从 GitHub 下载这个脚本）
+1) 确认 Node >= 22.19、dsh >= 0.2.0-rc.2，找到我正在用的 DSH profile（web/desktop）
+2) 安装 @linyanzhi/dsh-mesh，并验证包已落地、profile patch 有条目
+3) 装完停下来告诉我重启 DSH；等我重启后再确认左侧栏「AI 网络」可见
+4) 不要自动重启、不要 kill 进程、不要开启远程桌面控制；需要 UAC/管理员时停下
+5) 每一步报验证结果；同一步失败两次就停下报告原文
 ```
 
 ## 文档
@@ -260,6 +264,10 @@ dsh-mesh cluster status         # 本机 + 已配对节点的实例/延迟
 | 一步步安装（给人看） | [docs/INSTALL.md](docs/INSTALL.md) |
 | 最短快速开始 | [docs/QUICKSTART.md](docs/QUICKSTART.md) |
 | 让 AI 自己装 | [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md) |
+| AI 一页检查单 | [docs/AI-CHECKLIST.md](docs/AI-CHECKLIST.md) |
+| 复制给 AI 的提示词模板 | [docs/AI-PROMPTS.md](docs/AI-PROMPTS.md) |
+| AI 友好的安装/验机脚本 | [`node tools/ai-install.mjs --json`](tools/ai-install.mjs) |
+| 出问题怎么查 | [docs/TROUBLESHOOTING.zh.md](docs/TROUBLESHOOTING.zh.md) |
 | 架构 / 权限 / 组件 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | 开发历程（为什么这样设计） | [docs/HISTORY.md](docs/HISTORY.md) |
 | 公网中继（自建 frps） | [docs/SELF-HOST-RELAY.md](docs/SELF-HOST-RELAY.md) |
