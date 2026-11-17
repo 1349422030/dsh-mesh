@@ -1,0 +1,51 @@
+{
+  "name": "@linyanzhi/dsh-mesh",
+  "version": "0.3.46",
+  "description": "dsh-mesh main plugin: multi-device AI network topology in the DSH sidebar, with host bridge and server autostart installed as dependencies.",
+  "type": "module",
+  "main": "packages/dsh-mesh/lib/index.js",
+  "exports": {
+    ".": "./packages/dsh-mesh/lib/index.js",
+    "./client": "./packages/dsh-mesh/lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0-rc.2 <0.3.0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./packages/dsh-mesh/cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "dsh-mesh-node": "0.0.22",
+    "dsh-mesh-host": "0.0.5",
+    "dsh-mesh-autostart": "0.0.14"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.2 <0.3.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "files": [
+    "packages/dsh-mesh/lib",
+    "packages/dsh-mesh/cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LinYanZhi/dsh-mesh.git"
+  },
+  "homepage": "https://github.com/LinYanZhi/dsh-mesh#readme"
+}
