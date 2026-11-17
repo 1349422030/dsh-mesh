@@ -27,7 +27,8 @@ const arg = (f, d) => {
 const asJson = has('--json')
 const apply = has('--apply')
 const profile = arg('--profile', 'web')
-const dshHome = arg('--dsh-home', process.env.DSH_HOME || join(homedir(), '.dsh'))
+const dshBinArg = arg('--dsh-bin', '')
+let dshHome = arg('--dsh-home', process.env.DSH_HOME || join(homedir(), '.dsh'))
 const isWin = process.platform === 'win32'
 const PKG = '@linyanzhi/dsh-mesh'
 
@@ -56,17 +57,52 @@ function atLeast(v, [a, b, c]) {
   return x[0] > a || (x[0] === a && (x[1] > b || (x[1] === b && x[2] >= c)))
 }
 
+// 找到可用的 dsh：优先 --dsh-bin，其次 PATH，再找常见安装位置/本地 npm 安装
+function resolveDsh() {
+  const local = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
+  const pf = process.env.ProgramFiles || 'C:\\Program Files'
+  const candidates = []
+  if (dshBinArg) candidates.push({ cmd: dshBinArg, prefix: [] })
+  candidates.push({ cmd: 'dsh', prefix: [] })
+  if (isWin) {
+    candidates.push({ cmd: join(local, 'Programs', 'DeepSeek Harness', 'bin', 'dsh.cmd'), prefix: [] })
+    candidates.push({ cmd: join(pf, 'DeepSeek Harness', 'bin', 'dsh.cmd'), prefix: [] })
+    candidates.push({ cmd: join(local, 'Programs', 'dsh', 'bin', 'dsh.cmd'), prefix: [] })
+  }
+  const npmBin = join(homedir(), '.dsh-npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  if (existsSync(npmBin)) candidates.push({ cmd: process.execPath, prefix: [npmBin] })
+  for (const c of candidates) {
+    if (c.cmd !== 'dsh' && !existsSync(c.cmd)) continue
+    const r = run(c.cmd, [...c.prefix, '--version'], 30000)
+    const v = r.out || r.err
+    if (r.code === 0 || /\d+\.\d+\.\d+/.test(v)) return { ...c, version: v }
+  }
+  return null
+}
+
+// 如果默认 DSH_HOME 不存在，扫描 ~/.dsh* 候选
+let dshHomeCandidates = []
+if (!existsSync(dshHome)) {
+  try {
+    const names = readdirSync(homedir()).filter((n) => n === '.dsh' || /^\.dsh\d+$/.test(n))
+    dshHomeCandidates = names
+      .map((n) => join(homedir(), n))
+      .filter((p) => existsSync(join(p, 'profiles')))
+    if (dshHomeCandidates.length) dshHome = dshHomeCandidates[0]
+  } catch {}
+}
+
 // 1) Node
 const nodeV = process.versions.node
 step('node', atLeast(nodeV, [22, 19, 0]) ? 'ok' : 'fail', `node ${nodeV}`, atLeast(nodeV, [22, 19, 0]) ? '' : '升级到 Node 22.19+ 或 24+')
 
 // 2) dsh CLI + 版本
-let dshV = ''
-const dshTry = run('dsh', ['--version'], 30000)
-if (dshTry.code === 0) dshV = dshTry.out || dshTry.err
-step('dsh', dshV ? 'ok' : 'fail', dshV || 'dsh CLI not found in PATH', dshV ? '' : '让用户提供可在终端运行的 dsh（或从 DSH App 的安装目录找 bin/dsh.cmd）')
+const dsh = resolveDsh()
+const dshV = dsh ? dsh.version : ''
+step('dsh', dsh ? 'ok' : 'fail', dshV || 'dsh CLI not found (PATH / --dsh-bin / common install dirs)', dsh ? '' : '让用户提供 dsh 命令或安装目录，用 --dsh-bin <path> 重跑；DSH App 通常在安装目录的 bin/dsh.cmd')
 const dshCompat = !dshV || atLeast(dshV, [0, 2, 0]) // 0.2.0-rc.2 起
 step('dsh-version', dshCompat ? 'ok' : 'fail', dshV || 'unknown', dshCompat ? '' : 'DSH 需要 0.2.0-rc.2+（推荐 0.2.2-rc.1）')
+step('dsh-home', existsSync(dshHome) ? 'ok' : 'fail', dshHome + (dshHomeCandidates.length > 1 ? `（候选：${dshHomeCandidates.join(', ')}）` : ''), existsSync(dshHome) ? '' : '让用户确认 DSH_HOME；多实例时用 --dsh-home 指定')
 
 // 3) profile
 const profileDir = join(dshHome, 'profiles', profile)
@@ -102,7 +138,9 @@ step('profile-patch', patchHasMesh ? 'ok' : 'missing', patchHasMesh ? 'patch con
 
 // 6) 可选安装
 if (apply && !installed && existsSync(profileDir)) {
-  const r = run('dsh', ['plugin', '--profile', profile, 'add', PKG], 300000)
+  const r = dsh
+    ? run(dsh.cmd, [...dsh.prefix, 'plugin', '--profile', profile, 'add', PKG], 300000)
+    : { code: 1, out: '', err: 'dsh CLI not found; pass --dsh-bin <path>' }
   const ok = r.code === 0 && existsSync(pkgJson)
   step('apply', ok ? 'ok' : 'fail', ok ? `installed ${PKG}@${(() => { try { return JSON.parse(readFileSync(pkgJson, 'utf8')).version } catch { return '' } })()}` : `install command failed (exit ${r.code}): ${(r.err || r.out).slice(-400)}`, ok ? '让用户重启 DSH（见 next）' : '把错误原文报告给用户；不要反复重试超过 2 次')
 }
@@ -123,6 +161,8 @@ const summary = {
   platform: `${process.platform} ${process.arch}`,
   node: nodeV,
   dsh: dshV || null,
+  dshBin: dsh ? dsh.cmd : null,
+  dshHomeCandidates,
   dshHome,
   profile,
   profileDir,
