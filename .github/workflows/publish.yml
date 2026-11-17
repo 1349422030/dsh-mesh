@@ -1,0 +1,25 @@
+name: publish
+
+# 由 npm Trusted Publishing（OIDC）发布；不在本机保存长期 npm token。
+# 触发：push v* tag，或手动 workflow_dispatch。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish unpublished package versions
+        run: node tools/publish-changed.mjs
